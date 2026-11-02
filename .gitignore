@@ -1,0 +1,38 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python build and cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Data files (all synthetic, always regenerable from the seed)
+data/
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.csv
+
+# dbt (Slice 2 onwards)
+target/
+dbt_packages/
+logs/
+
+# OS and editor
+.DS_Store
+.vscode/
+.idea/

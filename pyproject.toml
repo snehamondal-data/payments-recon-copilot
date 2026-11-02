@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "payments-recon-copilot"
+version = "0.1.0"
+description = "Synthetic payments reconciliation pipeline with an AI copilot (fictional customer, synthetic data)."
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka~=2.16",
+    # 1.4 is DuckDB's LTS line. 2.0.0 prints spurious nanobind "leaked" warnings at interpreter exit.
+    "duckdb>=1.4,<1.5",
+    "pydantic~=2.14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest~=9.2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs the local Kafka broker from docker compose (make up)"]
+addopts = "-m 'not integration'"
