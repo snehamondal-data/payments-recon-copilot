@@ -240,3 +240,20 @@ def test_poison_and_redeliveries_are_in_the_stream(scenario):
 
 def test_processor_timestamps_are_utc(scenario):
     assert all(e.occurred_at.tzinfo == UTC for e in scenario.processor_events)
+
+
+def test_every_case_names_the_records_that_prove_it(scenario):
+    for c in scenario.cases:
+        assert c.required_record_ids, c.case_id
+        assert set(c.required_record_ids) <= set(c.record_ids), c.case_id
+
+
+def test_required_evidence_has_the_right_kind_of_record(scenario, idx):
+    events, journals, lines = idx
+    kinds = {e.event_id: e.event_type for e in scenario.processor_events}
+    for c in cases_of(scenario, T.FEE_MISMATCH):
+        assert kinds[c.required_record_ids[0]] == "fee" and c.required_record_ids[1].startswith("bln_")
+    for c in cases_of(scenario, T.CHARGEBACK):
+        assert kinds[c.required_record_ids[0]] == "dispute"
+    for c in cases_of(scenario, T.DUPLICATE_WEBHOOK):
+        assert [kinds[r] for r in c.required_record_ids] == ["charge", "charge"]

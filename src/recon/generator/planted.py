@@ -22,7 +22,9 @@ LEGACY_LEDGER_RATE_QUANTUM = Decimal("0.0001")  # the ledger rounds FX rates to 
 
 
 def _case(b: ScenarioBuilder, exception_type: T, charges: list, extra_ids: list[str] | None = None, *,
-          description: str, expected_status: str | None = "exception", should_escalate: bool = False) -> PlantedCase:
+          required: list[str], description: str, expected_status: str | None = "exception",
+          should_escalate: bool = False) -> PlantedCase:
+    """`required` are the records that prove the cause: what a correct diagnosis must cite (evidence recall)."""
     return PlantedCase(
         case_id="",  # assigned by plant_all
         exception_type=exception_type,
@@ -31,6 +33,7 @@ def _case(b: ScenarioBuilder, exception_type: T, charges: list, extra_ids: list[
         charge_ids=[c.charge_id for c in charges],
         record_ids=[rid for c in charges for rid in c.record_ids] + (extra_ids or []),
         description=description,
+        required_record_ids=required,
     )
 
 
@@ -42,7 +45,7 @@ def late_settlement(b: ScenarioBuilder, i: int) -> PlantedCase:
     deadline = settlement_deadline(day)
     assert deadline >= b.as_of
     edge = " (edge of window: deadline is the as-of date)" if deadline == b.as_of else ""
-    return _case(b, T.LATE_SETTLEMENT, [c], expected_status="pending_in_window",
+    return _case(b, T.LATE_SETTLEMENT, [c], required=[c.event.event_id], expected_status="pending_in_window",
                  description=f"Charged {day}, not settled yet. Deadline {deadline} (T+2 business days, "
                              f"inclusive) has not passed as of {b.as_of}{edge}. Must not be flagged.")
 
@@ -52,7 +55,7 @@ def missing_settlement(b: ScenarioBuilder, i: int) -> PlantedCase:
     c = b.charge(b.local_time(day), b.amount(), settle_lag=None)
     deadline = settlement_deadline(day)
     assert deadline < b.as_of
-    return _case(b, T.MISSING_SETTLEMENT, [c],
+    return _case(b, T.MISSING_SETTLEMENT, [c], required=[c.event.event_id],
                  description=f"Charged {day}, deadline {deadline} passed, never settled by the bank.")
 
 
@@ -65,7 +68,7 @@ def duplicate_webhook(b: ScenarioBuilder, i: int) -> PlantedCase:
     b.processor.append(dup)
     c.event_ids.append(dup.event_id)
     b.sale_journal(c, c.gross_usd, at + timedelta(minutes=b.rng.randint(11, 20)))
-    return _case(b, T.DUPLICATE_WEBHOOK, [c],
+    return _case(b, T.DUPLICATE_WEBHOOK, [c], required=[c.event.event_id, dup.event_id],
                  description=f"Processor delivered charge {c.charge_id} twice under different event_ids; "
                              "ledger posted two sale journals; bank settled once.")
 
@@ -73,7 +76,7 @@ def duplicate_webhook(b: ScenarioBuilder, i: int) -> PlantedCase:
 def fee_mismatch(b: ScenarioBuilder, i: int) -> PlantedCase:
     extra = b.rng.randint(25, 75)
     c = b.charge(b.local_time(b.baseline_day()), b.amount(), settle_lag=b.rng.choice((1, 2)), bank_net_delta=-extra)
-    return _case(b, T.FEE_MISMATCH, [c],
+    return _case(b, T.FEE_MISMATCH, [c], required=[c.event_ids[1], c.bank_line_ids[0]],  # fee event, settlement
                  description=f"Bank net is {extra} cents below gross minus the expected fee "
                              f"(expected net {c.net_usd}, settled {c.net_usd - extra}).")
 
@@ -83,8 +86,8 @@ def partial_refund_not_in_ledger(b: ScenarioBuilder, i: int) -> PlantedCase:
     amount = b.amount(2_000, 50_000)
     c = b.charge(b.local_time(day), amount, settle_lag=1)
     refund_amount = amount * b.rng.randint(20, 60) // 100
-    b.refund(c, b.local_time(day + timedelta(days=b.rng.randint(1, 3))), refund_amount, ledger=False)
-    return _case(b, T.PARTIAL_REFUND_NOT_IN_LEDGER, [c],
+    refund = b.refund(c, b.local_time(day + timedelta(days=b.rng.randint(1, 3))), refund_amount, ledger=False)
+    return _case(b, T.PARTIAL_REFUND_NOT_IN_LEDGER, [c], required=[refund.event_id, c.bank_line_ids[-1]],
                  description=f"Partial refund of {refund_amount} of {amount} cents at the processor and bank; "
                              "no refund journal in the ledger.")
 
@@ -103,7 +106,7 @@ def currency_rounding(b: ScenarioBuilder, i: int) -> PlantedCase:
     else:
         raise RuntimeError("could not plant a currency rounding case")
     c = b.charge(b.local_time(day), amount, currency, settle_lag=b.rng.choice((1, 2)), ledger_rate=legacy_rate)
-    return _case(b, T.CURRENCY_ROUNDING, [c],
+    return _case(b, T.CURRENCY_ROUNDING, [c], required=[c.journal_ids[0], c.bank_line_ids[0]],
                  description=f"{amount} {currency} minor units on {day}. Processor and bank used ref.fx_rates "
                              f"rate {rate}; ledger used it rounded to 4 dp ({legacy_rate}), so the ledger is "
                              f"{diff:+d} cents off.")
@@ -111,7 +114,7 @@ def currency_rounding(b: ScenarioBuilder, i: int) -> PlantedCase:
 
 def missing_ledger_entry(b: ScenarioBuilder, i: int) -> PlantedCase:
     c = b.charge(b.local_time(b.baseline_day()), b.amount(), settle_lag=b.rng.choice((1, 2)), ledger=False)
-    return _case(b, T.MISSING_LEDGER_ENTRY, [c],
+    return _case(b, T.MISSING_LEDGER_ENTRY, [c], required=[c.event.event_id, c.bank_line_ids[0]],
                  description="Processor and bank agree; the ledger has no journal for this charge.")
 
 
@@ -121,7 +124,7 @@ def orphan_bank_deposit(b: ScenarioBuilder, i: int) -> PlantedCase:
         value_date += timedelta(days=1)
     reference = f"TRF-{b.rng.getrandbits(32):08X}"
     line = b.emit_bank_line(value_date, reference, "credit", "DEPOSIT", b.amount(1_000, 30_000))
-    return _case(b, T.ORPHAN_BANK_DEPOSIT, [], [line.line_id],
+    return _case(b, T.ORPHAN_BANK_DEPOSIT, [], [line.line_id], required=[line.line_id],
                  description=f"Bank credit {line.net_amount_minor} cents on {value_date}, reference "
                              f"{reference}, matches no processor charge.")
 
@@ -136,7 +139,7 @@ def chargeback(b: ScenarioBuilder, i: int) -> PlantedCase:
     line = b.emit_bank_line(add_business_days(dispute_day, 1), c.charge_id, "debit", "CHARGEBACK",
                             amount + CHARGEBACK_FEE_MINOR)
     c.bank_line_ids.append(line.line_id)
-    return _case(b, T.CHARGEBACK, [c],
+    return _case(b, T.CHARGEBACK, [c], required=[dispute.event_id, line.line_id],
                  description=f"Settled charge disputed on {dispute_day}; bank debited {amount} plus a "
                              f"{CHARGEBACK_FEE_MINOR} cent fee. No reversal in the ledger.")
 
@@ -146,7 +149,7 @@ def date_boundary(b: ScenarioBuilder, i: int) -> PlantedCase:
     # 23:10 to 23:44 New York time is the next day in UTC; the ledger posts within 10 minutes, still local `day`.
     local = datetime.combine(day, time(23, b.rng.randint(10, 44), b.rng.randrange(60)), tzinfo=LOCAL_TZ)
     c = b.charge(local.astimezone(UTC), b.amount(), settle_lag=1)
-    return _case(b, T.DATE_BOUNDARY, [c], expected_status=None,
+    return _case(b, T.DATE_BOUNDARY, [c], required=[c.event.event_id, c.journal_ids[0]], expected_status=None,
                  description=f"Charged {local:%Y-%m-%d %H:%M} New York time = {c.event.occurred_at.date()} UTC. "
                              f"Processor date is {c.event.occurred_at.date()}, ledger posting_date is {day}. "
                              "Amounts agree. Expected status is decided in Slice 2.")
@@ -161,6 +164,7 @@ def ambiguous(b: ScenarioBuilder, i: int) -> PlantedCase:
         c2 = b.charge(b.local_time(day), amount, settle_lag=None)
         line = b.emit_bank_line(add_business_days(day, 1), None, "credit", "SETTLEMENT", c1.net_usd)
         return _case(b, T.AMBIGUOUS, [c1, c2], [line.line_id], should_escalate=True,
+                     required=[line.line_id, c1.event.event_id, c2.event.event_id],
                      description=f"Bank credit {c1.net_usd} cents with no reference equals the expected net of "
                                  f"both {c1.charge_id} and {c2.charge_id}. Cannot tell which one settled.")
     # Variant B: a shortfall explained equally well by an unledgered partial refund or a fee error.
@@ -168,8 +172,8 @@ def ambiguous(b: ScenarioBuilder, i: int) -> PlantedCase:
     at = b.local_time(day, 9, 12)
     shortfall = b.rng.randint(50, 150)
     c = b.charge(at, b.amount(), settle_lag=b.rng.choice((1, 2)), bank_net_delta=-shortfall)
-    b.refund(c, at + timedelta(hours=b.rng.randint(1, 5)), shortfall, ledger=False, bank=False)
-    return _case(b, T.AMBIGUOUS, [c], should_escalate=True,
+    refund = b.refund(c, at + timedelta(hours=b.rng.randint(1, 5)), shortfall, ledger=False, bank=False)
+    return _case(b, T.AMBIGUOUS, [c], should_escalate=True, required=[refund.event_id, c.bank_line_ids[0]],
                  description=f"Bank net is {shortfall} cents short. A same-day partial refund of exactly "
                              f"{shortfall} cents (not in the ledger) could have been netted, or the fee could be wrong.")
 

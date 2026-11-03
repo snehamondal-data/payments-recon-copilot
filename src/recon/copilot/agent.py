@@ -77,8 +77,14 @@ class RunResult:
     model_outputs: list[dict[str, Any]] = field(default_factory=list)
     validation_failures: list[list[str]] = field(default_factory=list)
     served_models: list[str] = field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int = 0            # uncached input only
+    output_tokens: int = 0           # includes thinking
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+    @property
+    def latency_s(self) -> float:
+        return (self.finished_at - self.started_at).total_seconds()
 
 
 class Copilot:
@@ -186,8 +192,8 @@ class Copilot:
         run.model_outputs.append(response.to_dict() if hasattr(response, "to_dict") else {"repr": repr(response)})
         run.served_models.append(getattr(response, "model", self.client.model))
         usage = getattr(response, "usage", None)
-        run.input_tokens += getattr(usage, "input_tokens", 0) or 0
-        run.output_tokens += getattr(usage, "output_tokens", 0) or 0
+        for name in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+            setattr(run, name, getattr(run, name) + (getattr(usage, name, 0) or 0))
 
     def _accept(self, run: RunResult, d: Diagnosis) -> None:
         if d.confidence < LOW_CONFIDENCE_THRESHOLD and d.proposed_action != ProposedAction.ESCALATE_TO_HUMAN:

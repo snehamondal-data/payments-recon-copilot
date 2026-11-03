@@ -77,6 +77,7 @@ class PlantedCase:
     record_ids: list[str]
     description: str
     held_out: bool = False
+    required_record_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 -include .env
 export
 
-.PHONY: venv up down generate load replay recon test test-integration test-live
+.PHONY: venv up down generate load replay recon test test-integration test-live eval-estimate eval-report
 
 venv:
 	python3 -m venv .venv
@@ -38,3 +38,9 @@ test-integration:
 
 test-live:
 	$(PY) -m pytest -m live -s
+
+eval-estimate:
+	$(PY) -m recon.evals estimate
+
+eval-report:
+	$(PY) -m recon.evals report

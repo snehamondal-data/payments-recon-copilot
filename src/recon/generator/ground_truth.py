@@ -29,12 +29,13 @@ def write_ground_truth(path: Path, scenario: Scenario) -> None:
                 held_out BOOLEAN NOT NULL,
                 charge_ids VARCHAR[] NOT NULL,
                 record_ids VARCHAR[] NOT NULL,
+                required_record_ids VARCHAR[] NOT NULL,  -- what a correct diagnosis must cite
                 description VARCHAR NOT NULL
             )""")
         con.executemany(
-            "INSERT INTO planted_cases VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO planted_cases VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(c.case_id, c.exception_type.value, c.expected_status, c.should_escalate, c.held_out,
-              c.charge_ids, c.record_ids, c.description) for c in scenario.cases],
+              c.charge_ids, c.record_ids, c.required_record_ids, c.description) for c in scenario.cases],
         )
         con.execute("CREATE TABLE expected_dlq (seq INTEGER PRIMARY KEY, topic VARCHAR NOT NULL, kind VARCHAR NOT NULL)")
         con.executemany("INSERT INTO expected_dlq VALUES (?, ?, ?)",

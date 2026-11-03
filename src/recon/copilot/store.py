@@ -117,6 +117,9 @@ class CopilotStore:
                 "tool_calls": len(run.tool_calls),
                 "input_tokens": run.input_tokens,
                 "output_tokens": run.output_tokens,
+                "cache_creation_input_tokens": run.cache_creation_input_tokens,
+                "cache_read_input_tokens": run.cache_read_input_tokens,
+                "latency_s": run.latency_s,
                 "finished_at": run.finished_at,
             }, at=run.finished_at, **meta)
             self.con.commit()

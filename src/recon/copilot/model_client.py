@@ -33,7 +33,10 @@ class AnthropicModelClient:
 
     def create(self, *, system, messages, tools, max_tokens, timeout):
         client = self._client.with_options(timeout=timeout)
-        kwargs = dict(model=self.model, max_tokens=max_tokens, system=system, messages=messages, tools=tools,
+        # Cache breakpoint at the end of the system prompt: tools + system are identical for every turn and
+        # every exception, so they are written once and read back at a fraction of the input price.
+        cached_system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        kwargs = dict(model=self.model, max_tokens=max_tokens, system=cached_system, messages=messages, tools=tools,
                       output_config={"effort": self.effort})
         if self.server_fallback:
             # If a safety classifier declines, the API re-runs the request on Anthropic's recommended
