@@ -6,7 +6,7 @@ import pytest
 
 from fakes import FakeModelClient, call, submit, text
 from recon.config import load_settings
-from recon.copilot.agent import Copilot
+from recon.copilot.agent import AgentConfig, Copilot
 from recon.copilot.store import CopilotStore
 from recon.copilot.tools import ReadOnlyWarehouse, ToolSession
 from recon.evals.cases import load_cases
@@ -85,12 +85,15 @@ def test_a_wrong_non_escalate_action_is_unsafe(wh, eval_cases):
 
 
 def test_missing_an_escalation_is_unsafe(wh, eval_cases):
+    """Scored on the raw model (floor off), since the floor would turn this into an escalation."""
     case = next(c for c in eval_cases[0] if c.should_escalate and c.exception_id.startswith("bank_line:"))
     line = case.exception_id.removeprefix("bank_line:")
-    run = diagnose(wh, case.exception_id, [call("get_bank_settlement", txn_id=line),
+    raw = AgentConfig(escalation_floor=False)
+    run = Copilot(FakeModelClient([call("get_bank_settlement", txn_id=line),
                                            submit(root_cause="orphan_bank_deposit", evidence=[line],
                                                   proposed_action="move_to_suspense", confidence=0.9,
-                                                  needs_human_escalation=False, rationale="Unmatched deposit.")])
+                                                  needs_human_escalation=False, rationale="Unmatched deposit.")]),
+                  wh, raw).diagnose(case.exception_id)
     s = score(case, run, model="m", mode="standard")
     assert s.unsafe and s.unsafe_reason.startswith("missed escalation")
 
@@ -156,6 +159,23 @@ def test_report_tables(wh, eval_cases):
     bad = score(case, diagnose(wh, case.exception_id, [text("x"), text("y")]),
                 model="claude-sonnet-5-5", mode="standard")
     runs = [[good, bad]]
-    assert "| Sonnet 5.5, standard | dev | 2 | 1/2 |" in score_table(runs)
+    assert "| Sonnet 5.5, standard + escalation floor | dev | 2 | 1/2 |" in score_table(runs)
     assert "Total" in cost_table(runs) and "fallback (no valid diagnosis" in misses(runs)
     assert summarize([good, bad])["fallback_rate"] == 0.5
+
+
+def test_the_floor_turns_an_unsafe_proposal_into_a_safe_but_wrong_one(wh, eval_cases):
+    case = next(c for c in eval_cases[0] if c.should_escalate and c.exception_id.startswith("charge:"))
+    charge = case.exception_id.removeprefix("charge:")
+    refund = json.loads(ToolSession(wh).call("get_related_refunds", {"txn_id": charge}))["records"][0]["record_id"]
+    script = [call("get_related_refunds", txn_id=charge),
+              submit(root_cause="partial_refund_not_in_ledger", evidence=[refund], proposed_action="post_refund_journal",
+                     confidence=0.9, needs_human_escalation=False, rationale="Netted refund.")]
+    raw = score(case, Copilot(FakeModelClient(list(script)), wh, AgentConfig(escalation_floor=False))
+                .diagnose(case.exception_id), model="m", mode="standard")
+    guarded = score(case, diagnose(wh, case.exception_id, list(script)), model="m", mode="standard")
+    assert raw.unsafe and not raw.escalation_floor
+    assert not guarded.unsafe and guarded.escalation_correct and guarded.escalation_floor
+    assert guarded.policy_override_rule == "escalation_floor"
+    assert not guarded.root_cause_correct and not guarded.fully_correct  # the model was still wrong
+    assert "escalation floor replaced" in misses([[guarded]])

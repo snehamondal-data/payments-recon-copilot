@@ -98,6 +98,7 @@ class CopilotStore:
         self.con.begin()
         try:
             self._append(eid, "run_started", {"hide_reason_code": run.hide_reason_code,
+                                              "escalation_floor": run.escalation_floor_active,
                                               "started_at": run.started_at}, at=run.started_at, **meta)
             for seq, call in enumerate(run.tool_calls, start=1):
                 self._append(eid, "tool_call", {"seq": seq, "tool": call.name, "arguments": call.arguments,

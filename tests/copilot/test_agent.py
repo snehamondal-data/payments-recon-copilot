@@ -263,3 +263,85 @@ def test_system_prompt_states_the_budget_contract_and_as_of():
     prompt = system_prompt(as_of="2026-10-15", max_tool_calls=8)
     assert "2026-10-15" in prompt and "at most\n   8 tool calls" in prompt
     assert "ambiguous: escalate_to_human ONLY" in prompt and "below 0.6" in prompt
+
+
+# --- escalation floor: the agent can raise concern, never lower it -------------------------
+
+def ambiguous_charge(wh):
+    """The planted shortfall case: reconciliation says ambiguous; a model may read it as an unbooked refund."""
+    row = next(r for r in wh.queue() if r["reason_code"] == "ambiguous" and r["item_type"] == "charge")
+    charge = row["charge_id"]
+    refunds = json.loads(ToolSession(wh).call("get_related_refunds", {"txn_id": charge}))["records"]
+    return row["exception_id"], charge, refunds[0]["record_id"]
+
+
+def overconfident_refund_script(exception_id, charge, refund_id, **overrides):
+    return [call("get_exception", exception_id=exception_id), call("get_related_refunds", txn_id=charge),
+            submit(**({"root_cause": "partial_refund_not_in_ledger", "evidence": [refund_id],
+                       "proposed_action": "post_refund_journal", "confidence": 0.9, "needs_human_escalation": False,
+                       "rationale": "The refund was netted into the settlement."} | overrides))]
+
+
+def test_floor_turns_any_action_on_an_ambiguous_exception_into_an_escalation(wh):
+    exception_id, charge, refund_id = ambiguous_charge(wh)
+    result, _ = run(wh, overconfident_refund_script(exception_id, charge, refund_id))
+    assert not result.is_fallback and result.escalation_floor_active
+    d = result.diagnosis
+    assert d.proposed_action == ProposedAction.ESCALATE_TO_HUMAN and d.needs_human_escalation
+    assert d.root_cause == RootCause.PARTIAL_REFUND_NOT_IN_LEDGER  # the model's claim is kept, for the record
+    assert result.policy_override == {"rule": "escalation_floor", "reason_code": "ambiguous",
+                                      "original_root_cause": "partial_refund_not_in_ledger",
+                                      "original_action": "post_refund_journal", "confidence": 0.9}
+
+
+def test_floor_fires_whatever_root_cause_the_model_claims(wh, cases):
+    case = cases["ambiguous"]  # an ambiguous deposit; the model claims it's a plain orphan
+    line = case.exception_id.removeprefix("bank_line:")
+    client = FakeModelClient([call("get_bank_settlement", txn_id=line),
+                              submit(root_cause="orphan_bank_deposit", evidence=[line],
+                                     proposed_action="move_to_suspense", confidence=0.95,
+                                     needs_human_escalation=False, rationale="No match.")])
+    result = Copilot(client, wh).diagnose(case.exception_id)
+    assert result.diagnosis.proposed_action == ProposedAction.ESCALATE_TO_HUMAN
+    assert result.policy_override["rule"] == "escalation_floor"
+
+
+def test_floor_beats_the_low_confidence_rule_when_both_apply(wh):
+    exception_id, charge, refund_id = ambiguous_charge(wh)
+    result, _ = run(wh, overconfident_refund_script(exception_id, charge, refund_id, confidence=0.3))
+    assert result.policy_override["rule"] == "escalation_floor"
+
+
+def test_no_override_when_the_model_already_escalates(wh):
+    exception_id, charge, refund_id = ambiguous_charge(wh)
+    result, _ = run(wh, overconfident_refund_script(
+        exception_id, charge, refund_id, root_cause="ambiguous", proposed_action="escalate_to_human",
+        needs_human_escalation=True))
+    assert result.policy_override is None and result.diagnosis.needs_human_escalation
+
+
+def test_floor_never_touches_non_ambiguous_exceptions(wh, fee):
+    case, charge, evidence = fee
+    result, _ = run(wh, investigate(case, charge) + [submit(**good_submission(evidence))])
+    assert result.escalation_floor_active and result.policy_override is None
+    assert result.diagnosis.proposed_action == ProposedAction.RAISE_FEE_CLAIM_WITH_PROCESSOR
+
+
+def test_blind_mode_has_no_floor_and_measures_the_raw_model(recon_db):
+    blind = ReadOnlyWarehouse(recon_db[0], hide_reason_code=True)
+    try:
+        exception_id, charge, refund_id = ambiguous_charge(blind)
+        client = FakeModelClient(overconfident_refund_script(exception_id, charge, refund_id))
+        result = Copilot(client, blind).diagnose(exception_id)
+        assert not result.escalation_floor_active and result.policy_override is None
+        assert result.diagnosis.proposed_action == ProposedAction.POST_REFUND_JOURNAL
+    finally:
+        blind.close()
+
+
+def test_floor_can_be_switched_off_for_raw_measurements(wh):
+    exception_id, charge, refund_id = ambiguous_charge(wh)
+    client = FakeModelClient(overconfident_refund_script(exception_id, charge, refund_id))
+    result = Copilot(client, wh, AgentConfig(escalation_floor=False)).diagnose(exception_id)
+    assert not result.escalation_floor_active
+    assert result.diagnosis.proposed_action == ProposedAction.POST_REFUND_JOURNAL

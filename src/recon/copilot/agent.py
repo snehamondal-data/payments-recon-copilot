@@ -58,6 +58,9 @@ class AgentConfig:
     max_tool_calls: int = 8
     timeout_s: float = 90.0
     max_tokens: int = 16000
+    # When reconciliation says ambiguous, only escalate_to_human may stand: the agent can raise concern,
+    # never lower it. Off in blind mode, which has no reason code and measures the raw model.
+    escalation_floor: bool = True
 
 
 @dataclass
@@ -77,6 +80,7 @@ class RunResult:
     model_outputs: list[dict[str, Any]] = field(default_factory=list)
     validation_failures: list[list[str]] = field(default_factory=list)
     served_models: list[str] = field(default_factory=list)
+    escalation_floor_active: bool = False
     input_tokens: int = 0            # uncached input only
     output_tokens: int = 0           # includes thinking
     cache_creation_input_tokens: int = 0
@@ -105,6 +109,7 @@ class Copilot:
             diagnosis=None, is_fallback=False, fallback_reason=None, policy_override=None,  # type: ignore[arg-type]
             hide_reason_code=self.warehouse.hide_reason_code, prompt_version=PROMPT_VERSION,
             started_at=datetime.now(timezone.utc), finished_at=datetime.now(timezone.utc))
+        run.escalation_floor_active = self.config.escalation_floor and not self.warehouse.hide_reason_code
         session = ToolSession(self.warehouse)
         run.tool_calls = session.calls
         try:
@@ -178,7 +183,7 @@ class Copilot:
                         results.append(_result(block.id, str(err), error=True))
 
             if accepted is not None:
-                return self._accept(run, accepted)
+                return self._accept(run, accepted, reason_code=row["reason_code"])
             if invalid > 1:
                 return self._fallback(run, row, "invalid diagnosis after one retry")
             if over_budget:
@@ -195,12 +200,23 @@ class Copilot:
         for name in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
             setattr(run, name, getattr(run, name) + (getattr(usage, name, 0) or 0))
 
-    def _accept(self, run: RunResult, d: Diagnosis) -> None:
-        if d.confidence < LOW_CONFIDENCE_THRESHOLD and d.proposed_action != ProposedAction.ESCALATE_TO_HUMAN:
+    def _accept(self, run: RunResult, d: Diagnosis, *, reason_code: str) -> None:
+        escalate = {"proposed_action": ProposedAction.ESCALATE_TO_HUMAN, "needs_human_escalation": True}
+        if d.proposed_action == ProposedAction.ESCALATE_TO_HUMAN:
+            run.diagnosis = d
+            return
+        # Escalation floor: reconciliation flagged it ambiguous, so whatever root cause the model claims,
+        # nothing but an escalation may stand. The model's own root cause is kept, for the record and the evals.
+        if run.escalation_floor_active and reason_code == RootCause.AMBIGUOUS:
+            run.policy_override = {"rule": "escalation_floor", "reason_code": reason_code,
+                                   "original_root_cause": d.root_cause.value,
+                                   "original_action": d.proposed_action.value, "confidence": d.confidence}
+            run.diagnosis = d.model_copy(update=escalate)
+            return
+        if d.confidence < LOW_CONFIDENCE_THRESHOLD:
             run.policy_override = {"rule": "low_confidence", "threshold": LOW_CONFIDENCE_THRESHOLD,
                                    "confidence": d.confidence, "original_action": d.proposed_action.value}
-            d = d.model_copy(update={"proposed_action": ProposedAction.ESCALATE_TO_HUMAN,
-                                     "needs_human_escalation": True})
+            d = d.model_copy(update=escalate)
         run.diagnosis = d
 
     def _fallback(self, run: RunResult, row: dict[str, Any], reason: str) -> None:

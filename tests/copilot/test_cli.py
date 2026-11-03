@@ -205,3 +205,22 @@ def test_diagnose_all_skips_exceptions_that_already_have_a_proposal(cli, fee_scr
     cli.state["script"] = []  # the fake answers in plain text: every run falls back, which is fine here
     code, out = cli("diagnose", "--all")
     assert code == 0 and len(out.splitlines()) == 29 and case.exception_id not in out
+
+
+def test_show_explains_an_escalation_floor_override(cli, recon_db):
+    wh = ReadOnlyWarehouse(recon_db[0])
+    row = next(r for r in wh.queue() if r["reason_code"] == "ambiguous" and r["item_type"] == "charge")
+    refund = json.loads(ToolSession(wh).call("get_related_refunds", {"txn_id": row["charge_id"]}))["records"][0]
+    wh.close()
+    cli.state["script"] = [call("get_related_refunds", txn_id=row["charge_id"]),
+                           submit(root_cause="partial_refund_not_in_ledger", evidence=[refund["record_id"]],
+                                  proposed_action="post_refund_journal", confidence=0.9,
+                                  needs_human_escalation=False, rationale="Netted refund.")]
+    code, out = cli("diagnose", row["exception_id"])
+    assert "escalate_to_human" in out and "escalation floor: escalated" in out
+    shown = cli("show", row["exception_id"])[1]
+    assert "POLICY OVERRIDE (escalation floor)" in shown and "post_refund_journal" in shown
+    events = audit(cli.copilot_db)
+    override = json.loads(next(e["payload"] for e in events if e["event_type"] == "policy_override"))
+    assert override["rule"] == "escalation_floor"
+    assert json.loads(next(e["payload"] for e in events if e["event_type"] == "run_started"))["escalation_floor"]

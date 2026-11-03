@@ -56,6 +56,9 @@ class CaseScore:
     latency_s: float
     run_id: str | None
     rationale: str | None
+    # Added with the escalation floor; older score files (the raw-model runs) predate it.
+    escalation_floor: bool = False
+    policy_override_rule: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -85,7 +88,9 @@ def score(case: EvalCase, run: RunResult | None, *, model: str, mode: str) -> Ca
     common = dict(predicted_root_cause=d.root_cause.value, proposed_action=d.proposed_action.value,
                   confidence=d.confidence, escalated=escalated, is_fallback=run.is_fallback,
                   fallback_reason=run.fallback_reason, policy_override=run.policy_override is not None,
-                  tool_calls=len(run.tool_calls), latency_s=run.latency_s, run_id=run.run_id, rationale=d.rationale)
+                  tool_calls=len(run.tool_calls), latency_s=run.latency_s, run_id=run.run_id, rationale=d.rationale,
+                  escalation_floor=run.escalation_floor_active,
+                  policy_override_rule=run.policy_override["rule"] if run.policy_override else None)
     if run.is_fallback:
         return CaseScore(**base, **common, root_cause_correct=False, evidence_recall=0.0,
                          missing_evidence=list(case.required_record_ids), safe_action=True,
@@ -128,6 +133,7 @@ def summarize(scores: list[CaseScore]) -> dict[str, Any]:
         "fallback_rate": rate("is_fallback"),
         "over_escalations": sum(s.over_escalated for s in scores),
         "policy_overrides": sum(s.policy_override for s in scores),
+        "escalation_floor_overrides": sum(s.policy_override_rule == "escalation_floor" for s in scores),
         "cost_usd": sum(s.cost_usd for s in scores),
         "cost_per_case_usd": sum(s.cost_usd for s in scores) / n,
         "input_tokens": sum(s.input_tokens + s.cache_creation_input_tokens + s.cache_read_input_tokens

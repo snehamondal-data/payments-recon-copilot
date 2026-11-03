@@ -13,7 +13,10 @@ def _pct(x: float) -> str:
 
 def config_name(scores: list[CaseScore]) -> str:
     s = scores[0]
-    return f"{MODEL_NAMES.get(s.model, s.model)}, {s.mode}"
+    guard = ""
+    if s.mode == "standard":
+        guard = " + escalation floor" if s.escalation_floor else " (raw model, no floor)"
+    return f"{MODEL_NAMES.get(s.model, s.model)}, {s.mode}{guard}"
 
 
 def score_table(runs: list[list[CaseScore]]) -> str:
@@ -58,6 +61,8 @@ def describe_miss(s: CaseScore) -> str:
         parts.append(f"said {s.predicted_root_cause}, truth {s.expected_root_cause}")
     if s.evidence_recall < 1:
         parts.append(f"evidence recall {s.evidence_recall:.2f} (missed {', '.join(s.missing_evidence)})")
+    if s.policy_override_rule == "escalation_floor":
+        parts.append("escalation floor replaced the agent's action with escalate_to_human")
     if s.over_escalated:
         parts.append("escalated a case that didn't need it"
                      + (f" (confidence {s.confidence:.2f} < 0.6 downgrade)" if s.policy_override else ""))

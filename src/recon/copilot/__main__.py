@@ -70,8 +70,13 @@ def render_show(warehouse: ReadOnlyWarehouse, store: CopilotStore, exception_id:
     if p.is_fallback:
         out.append(f"  FALLBACK: {p.fallback_reason}")
     if p.policy_override:
-        out.append(f"  POLICY OVERRIDE: confidence {p.policy_override['confidence']:.2f} < "
-                   f"{p.policy_override['threshold']}, so {p.policy_override['original_action']} became escalate_to_human")
+        o = p.policy_override
+        if o["rule"] == "escalation_floor":
+            out.append(f"  POLICY OVERRIDE (escalation floor): reconciliation says ambiguous, so the agent's "
+                       f"{o['original_action']} (as {o['original_root_cause']}) became escalate_to_human")
+        else:
+            out.append(f"  POLICY OVERRIDE: confidence {o['confidence']:.2f} < {o['threshold']}, "
+                       f"so {o['original_action']} became escalate_to_human")
     out += ["  rationale:", *[f"    {line}" for line in d["rationale"].splitlines()], "", "Evidence"]
     for rid in d["evidence"]:
         record = warehouse.lookup_record(rid)
@@ -138,7 +143,7 @@ def main(argv: list[str] | None = None, *, settings: Settings | None = None,
                 store.record_run(run)
                 d = run.diagnosis
                 flag = f"  FALLBACK: {run.fallback_reason}" if run.is_fallback else (
-                    "  (low confidence: escalated)" if run.policy_override else "")
+                    f"  ({run.policy_override['rule'].replace('_', ' ')}: escalated)" if run.policy_override else "")
                 out(f"{eid}: {d.root_cause.value} -> {d.proposed_action.value} "
                     f"(confidence {d.confidence:.2f}, {len(run.tool_calls)} tool calls){flag}")
         elif args.command == "show":
