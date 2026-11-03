@@ -3,7 +3,7 @@ from collections import Counter
 import pytest
 from confluent_kafka import KafkaError
 
-from conftest import FakeDLQ, as_raw_messages, load_all
+from helpers import FakeDLQ, as_raw_messages, load_all
 from recon.fx import read_fx_csv, write_fx_csv
 from recon.loader.consume import run
 from recon.loader.schema import SOURCE_TABLES, ensure_schema

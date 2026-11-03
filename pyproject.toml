@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "payments-recon-copilot"
-version = "0.2.0"
+version = "0.3.0"
 description = "Synthetic payments reconciliation pipeline with an AI copilot (fictional customer, synthetic data)."
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic~=2.4",
     "confluent-kafka~=2.16",
     # 1.4 is DuckDB's LTS line. 2.0.0 prints spurious nanobind "leaked" warnings at interpreter exit.
     "duckdb>=1.4,<1.5",
@@ -15,6 +16,7 @@ dependencies = [
     "dbt-core~=1.12.6",
     "dbt-duckdb~=1.11.1",
     "pydantic~=2.14",
+    "python-dotenv~=1.2",
 ]
 
 [project.optional-dependencies]
@@ -25,5 +27,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: needs the local Kafka broker from docker compose (make up)"]
-addopts = "-m 'not integration'"
+markers = [
+    "integration: needs the local Kafka broker from docker compose (make up)",
+    "live: calls the real Anthropic API (costs money; needs ANTHROPIC_API_KEY in .env)",
+]
+addopts = "-m 'not integration and not live'"

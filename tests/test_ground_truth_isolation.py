@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from conftest import FakeDLQ, as_raw_messages, load_all
+from helpers import FakeDLQ, as_raw_messages, load_all
 from recon.config import load_settings
 from recon.fx import read_fx_csv, write_fx_csv
 from recon.generator.ground_truth import write_ground_truth
@@ -51,12 +51,16 @@ def test_main_warehouse_contains_no_ground_truth_tables(scenario, tmp_path):
         wh.close()
 
 
-@pytest.mark.parametrize("package", ["loader", "warehouse"])
-def test_loader_and_warehouse_code_never_reference_ground_truth(package):
-    for path in (SRC / package).rglob("*.py"):
+@pytest.mark.parametrize("package", ["loader", "warehouse", "copilot"])
+def test_loader_warehouse_and_copilot_code_never_reference_ground_truth(package):
+    files = list((SRC / package).rglob("*.py"))
+    assert files
+    for path in files:
         text = path.read_text()
         assert "ground_truth" not in text, path
         assert "recon.generator" not in text, path
+        for table in GROUND_TRUTH_TABLES:
+            assert table not in text, path
 
 
 def test_dbt_project_never_reads_ground_truth():

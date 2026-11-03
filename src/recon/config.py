@@ -12,6 +12,10 @@ SOURCE_TOPICS = ("processor.events", "bank.settlements", "ledger.entries")
 DLQ_TOPIC = "dlq"
 
 
+def _flag(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     kafka_bootstrap: str
@@ -21,11 +25,25 @@ class Settings:
     fx_rates_path: Path
     seed: int
     as_of: date
+    # Copilot (Slice 3)
+    copilot_db_path: Path = Path("data/copilot.duckdb")
+    recon_model: str = "claude-sonnet-5-5"
+    copilot_max_tool_calls: int = 8
+    copilot_timeout_s: float = 90.0
+    copilot_hide_reason_code: bool = False
+    copilot_effort: str = "medium"
 
     def __post_init__(self) -> None:
         # The warehouse must never be the ground-truth file, or the agent could read the answers.
-        if self.duckdb_path.resolve() == self.ground_truth_path.resolve():
-            raise ValueError("DUCKDB_PATH and GROUND_TRUTH_PATH must be different files")
+        files = {"DUCKDB_PATH": self.duckdb_path, "GROUND_TRUTH_PATH": self.ground_truth_path,
+                 "COPILOT_DB_PATH": self.copilot_db_path}
+        resolved = {name: path.resolve() for name, path in files.items()}
+        if len(set(resolved.values())) != len(resolved):
+            raise ValueError(f"{', '.join(files)} must be three different files")
+
+    def agent_forbidden_paths(self) -> tuple[Path, ...]:
+        """Files the copilot's warehouse connection must refuse to open: the answers, and its own audit store."""
+        return (self.ground_truth_path, self.copilot_db_path)
 
     def topic(self, logical_name: str) -> str:
         return f"{self.topic_prefix}{logical_name}"
@@ -40,4 +58,10 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         fx_rates_path=Path(env.get("FX_RATES_PATH", "data/ref/fx_rates.csv")),
         seed=int(env.get("SEED", "42")),
         as_of=date.fromisoformat(env.get("AS_OF", "2026-10-15")),
+        copilot_db_path=Path(env.get("COPILOT_DB_PATH", "data/copilot.duckdb")),
+        recon_model=env.get("RECON_MODEL", "claude-sonnet-5-5"),
+        copilot_max_tool_calls=int(env.get("COPILOT_MAX_TOOL_CALLS", "8")),
+        copilot_timeout_s=float(env.get("COPILOT_TIMEOUT_S", "90")),
+        copilot_hide_reason_code=_flag(env.get("COPILOT_HIDE_REASON_CODE", "false")),
+        copilot_effort=env.get("COPILOT_EFFORT", "medium"),
     )

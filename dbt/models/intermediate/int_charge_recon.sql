@@ -1,7 +1,7 @@
 -- One row per charge: processor vs bank vs ledger, with a reason_code and a window_status.
 --
 -- Reason codes are checked in priority order, and the first one that applies wins:
---   ambiguous                     two explanations fit equally well (escalate, don't guess)
+--   ambiguous                     two explanations fit equally well, or none does (escalate, don't guess)
 --   duplicate_webhook             the processor delivered the same charge more than once
 --   missing_ledger_entry          no sale journal
 --   missing_settlement            unsettled and the T+2 business-day window has closed
@@ -10,7 +10,7 @@
 --   partial_refund_not_in_ledger  processor refunds exceed ledger refunds
 --   fee_mismatch                  bank net differs from gross minus the processor fee
 --   currency_rounding             ledger differs from bank by a cent or two on a non-USD charge
---   ledger_amount_mismatch        ledger differs from bank in any other way
+--   (ambiguous again)             ledger differs from bank and no rule above explains it
 --   date_mismatch                 amounts tie, but the ledger dates it on a different day (timing only)
 
 with charges as (
@@ -133,7 +133,8 @@ reasoned as (
             when ledger_vs_bank_minor <> 0
                 and currency <> 'USD'
                 and abs(ledger_vs_bank_minor) <= {{ var('fx_rounding_tolerance_minor') }} then 'currency_rounding'
-            when ledger_vs_bank_minor <> 0 then 'ledger_amount_mismatch'
+            -- A difference no rule explains is for a human, not a guess.
+            when ledger_vs_bank_minor <> 0 then 'ambiguous'
             when first_posting_date <> charge_date_utc then 'date_mismatch'
         end as reason_code
     from measured
@@ -148,7 +149,12 @@ select
     end as window_status,
     -- The amount at stake for this reason, in USD cents (0 when only the timing differs).
     case reason_code
-        when 'ambiguous' then case when is_settled then settlement_shortfall_minor else expected_net_minor end
+        when 'ambiguous' then
+            case
+                when not is_settled then expected_net_minor
+                when settlement_shortfall_minor <> 0 then abs(settlement_shortfall_minor)
+                else abs(ledger_vs_bank_minor)
+            end
         when 'duplicate_webhook' then abs(ledger_sale_net_minor - expected_net_minor)
         when 'missing_ledger_entry' then case when is_settled then bank_settled_net_minor else expected_net_minor end
         when 'missing_settlement' then expected_net_minor
@@ -156,7 +162,6 @@ select
         when 'partial_refund_not_in_ledger' then unbooked_refund_minor
         when 'fee_mismatch' then abs(settlement_shortfall_minor)
         when 'currency_rounding' then abs(ledger_vs_bank_minor)
-        when 'ledger_amount_mismatch' then abs(ledger_vs_bank_minor)
         when 'date_mismatch' then 0
     end as amount_minor
 from reasoned

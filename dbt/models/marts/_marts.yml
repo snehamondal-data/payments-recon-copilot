@@ -25,7 +25,6 @@ models:
                   - partial_refund_not_in_ledger
                   - fee_mismatch
                   - currency_rounding
-                  - ledger_amount_mismatch
                   - date_mismatch
                   - orphan_bank_deposit
       - name: amount_minor

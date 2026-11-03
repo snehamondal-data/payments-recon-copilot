@@ -17,7 +17,8 @@ production deployment.
 |---|---|---|
 | 1 | Data in: Kafka (KRaft), generator, contracts, DLQ, idempotent DuckDB loader | done |
 | 2 | Reconciliation: dbt staging, matching, `recon_matches`, `recon_exceptions`, `recon_pending` | done |
-| 3 to 9 | Copilot, evals, Snowflake, Airflow, docs, PDFs, Kubernetes | not started |
+| 3 | Copilot: typed read-only tools, validated tool-use loop, review CLI, audit log | done |
+| 4 to 9 | Evals, Snowflake, Airflow, docs, PDFs, Kubernetes | not started |
 
 ## Quickstart (Mac on Apple Silicon)
 
@@ -30,8 +31,9 @@ make generate          # build the scenario (seed 42) and publish it
 make load              # load into data/warehouse.duckdb, stop at the end of each partition
 make replay            # re-read every topic from the start: inserts zero rows
 make recon             # dbt build: models plus dbt tests (as-of date from AS_OF)
-make test              # unit tests (no Docker needed)
+make test              # unit tests (no Docker, no API calls)
 make test-integration  # end to end against the local broker
+make test-live         # one real Claude call (needs ANTHROPIC_API_KEY in .env; costs a few cents)
 make down              # stop Kafka and delete its data
 ```
 
@@ -133,7 +135,7 @@ settlement of its own, the same expected net amount, and the line's value date i
 
 | Reason code | Meaning |
 |---|---|
-| `ambiguous` | a deposit fits several charges, or a shortfall equals both an unbooked refund and a plausible fee error: escalate |
+| `ambiguous` | a deposit fits several charges, a shortfall equals both an unbooked refund and a plausible fee error, or a ledger/bank difference fits no rule: escalate |
 | `duplicate_webhook` | the processor delivered the same charge more than once |
 | `missing_ledger_entry` | no sale journal |
 | `missing_settlement` | unsettled after the window closed |
@@ -141,7 +143,6 @@ settlement of its own, the same expected net amount, and the line's value date i
 | `partial_refund_not_in_ledger` | processor refunds exceed ledger refunds |
 | `fee_mismatch` | bank net differs from gross minus the processor fee |
 | `currency_rounding` | ledger differs from bank by 1 or 2 cents on a non-USD charge |
-| `ledger_amount_mismatch` | ledger differs from bank in any other way |
 | `date_mismatch` | amounts tie, but the ledger dates it on a different day (timing only) |
 | `orphan_bank_deposit` | a bank line that names no known charge, or has no candidate |
 
@@ -163,6 +164,75 @@ Each row of `recon_exceptions` has these fields:
   runs `dbt build`. It then scores `recon_exceptions` against the ground-truth file: every planted case
   must appear with the right reason code, the late settlements must not appear, and there must be no
   unexplained exceptions.
+
+## The copilot (Slice 3)
+
+The copilot investigates one exception at a time and **proposes** a resolution. A human approves or
+rejects every proposal, and approving only ever writes a resolution record. Source data is never
+changed.
+
+```bash
+python -m recon.copilot queue                         # exceptions + proposal/review state
+python -m recon.copilot diagnose charge:ch_...        # or --all
+python -m recon.copilot show charge:ch_...            # diagnosis, evidence records, tool trace
+python -m recon.copilot approve charge:ch_... --reason "..."
+python -m recon.copilot reject  charge:ch_... --reason "..."
+python -m recon.copilot resolve charge:ch_... --action post_fee_adjustment --reason "..."
+```
+
+**The agent never writes SQL.** It can call six typed tools: `get_exception`, `get_processor_events`,
+`get_bank_settlement`, `get_ledger_entries`, `get_related_refunds` and `get_fx_rate`. Each tool:
+
+- validates its arguments with pydantic (ID patterns, real dates, a currency enum) before any query runs;
+- runs one fixed, parameterised `SELECT`;
+- returns records that each carry a `record_id`.
+
+The connection is DuckDB `read_only` with external access disabled and the configuration locked. A
+stray `ATTACH` of the ground-truth file, a file read or a write all fail, and tests check each one.
+
+**Structured output.** The model finishes by calling `submit_diagnosis`. The submission is validated
+with pydantic:
+
+- `root_cause`: one of the 10 reconciliation reason codes.
+- `evidence`: record IDs that must have been returned by a tool in that same investigation.
+- `proposed_action`, `confidence`, `needs_human_escalation`, `rationale`.
+
+An invalid submission gets one retry. After that comes the **deterministic fallback**: the
+reconciliation reason code, `escalate_to_human`, confidence 0, flagged `is_fallback`.
+
+**Safety contract** ([contract.py](src/recon/copilot/contract.py)). `escalate_to_human` is always
+allowed; for `ambiguous` it is the only option.
+
+| root_cause | allowed actions besides escalation |
+|---|---|
+| `ambiguous` | none |
+| `missing_settlement` | `request_settlement_trace` |
+| `duplicate_webhook` | `reverse_duplicate_journal` |
+| `missing_ledger_entry` | `post_missing_sale_journal` |
+| `partial_refund_not_in_ledger` | `post_refund_journal` |
+| `chargeback` | `post_chargeback_journal` |
+| `fee_mismatch` | `raise_fee_claim_with_processor`, `post_fee_adjustment` |
+| `currency_rounding` | `post_fx_rounding_adjustment` |
+| `orphan_bank_deposit` | `move_to_suspense` |
+| `date_mismatch` | `mark_timing_difference` (no money moves) |
+
+**Guard rails:**
+
+- Each investigation has a budget of 8 tool calls and a 90-second timeout.
+- API errors, refusals and truncated responses end in the fallback.
+- A diagnosis with confidence below 0.6 is downgraded to an escalation, and the override is logged.
+- Text inside records (a bank reference, say) is treated as data, never as instructions. A test
+  plants an instruction in a bank reference, and even a model that obeys it is stopped by validation.
+
+**Blind mode.** With `COPILOT_HIDE_REASON_CODE=true`, `get_exception` doesn't return the
+reconciliation reason code, so the agent must work out the cause itself. `show` still displays the
+code to the reviewer.
+
+**Audit log.** `data/copilot.duckdb` holds an append-only `audit_log` and a `resolutions` table. The
+log records every tool call with its arguments, every raw model output, any validation failure or
+policy override, the final diagnosis, and every review decision, each with a timestamp. Unit tests
+use a scripted fake model, so they make no API calls and cost nothing. The model and the key come
+from `.env` (`RECON_MODEL`, default `claude-sonnet-5-5`; `ANTHROPIC_API_KEY`).
 
 ## The scenario
 

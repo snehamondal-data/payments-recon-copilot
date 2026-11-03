@@ -5,29 +5,16 @@ This test may read ground truth. The dbt models must not (see test_ground_truth_
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 from collections import Counter
 from datetime import timedelta
-from pathlib import Path
 
 import duckdb
 import pytest
 
-from conftest import FakeDLQ, as_raw_messages, load_all
+from helpers import build_recon_warehouse
 from recon.business_days import settlement_deadline
-from recon.fx import read_fx_csv, write_fx_csv
 from recon.generator import build_scenario
-from recon.generator.ground_truth import write_ground_truth
-from recon.loader.schema import ensure_schema
-from recon.loader.sink import Sink, load_fx_rates
 from recon.taxonomy import ExceptionType as T
-from recon.warehouse import DuckDBClient
-
-DBT_DIR = Path(__file__).resolve().parents[1] / "dbt"
-DBT = Path(sys.executable).parent / "dbt"
 
 # What reconciliation should call each planted problem. None = must not appear at all.
 EXPECTED_REASON = {t: t.value for t in T} | {
@@ -48,26 +35,8 @@ def scenario(request):
 
 @pytest.fixture(scope="module")
 def built(scenario, tmp_path_factory):
-    """Load the scenario (no Kafka needed), run `dbt build`, and hand back both DuckDB files."""
-    tmp = tmp_path_factory.mktemp("recon")
-    warehouse_path, ground_truth_path = tmp / "warehouse.duckdb", tmp / "ground_truth.duckdb"
-    write_ground_truth(ground_truth_path, scenario)
-    write_fx_csv(tmp / "fx.csv", scenario.fx_rates)
-    wh = DuckDBClient(warehouse_path)
-    ensure_schema(wh)
-    load_fx_rates(wh, read_fx_csv(tmp / "fx.csv"))
-    load_all(Sink(wh, FakeDLQ()), as_raw_messages(scenario))
-    wh.close()
-
-    # A subprocess, like `make recon`: dbt-duckdb keeps its connection open in-process otherwise.
-    proc = subprocess.run([
-        str(DBT), "build", "--project-dir", str(DBT_DIR), "--profiles-dir", str(DBT_DIR),
-        "--target-path", str(tmp / "target"), "--log-path", str(tmp / "logs"),
-        "--vars", f"{{as_of: '{scenario.as_of}'}}",
-    ], env=os.environ | {"DUCKDB_PATH": str(warehouse_path)}, capture_output=True, text=True)
-    assert proc.returncode == 0, f"dbt build failed:\n{proc.stdout[-3000:]}"
-    result = json.loads((tmp / "target" / "run_results.json").read_text())
-
+    """Load the scenario, run `dbt build`, and hand back both DuckDB files and the dbt run results."""
+    warehouse_path, ground_truth_path, result = build_recon_warehouse(scenario, tmp_path_factory.mktemp("recon"))
     con = duckdb.connect(str(warehouse_path), read_only=True)
     gt = duckdb.connect(str(ground_truth_path), read_only=True)
     yield con, gt, result
