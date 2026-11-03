@@ -28,13 +28,12 @@ def test_readme_sections_are_in_the_agreed_order():
                             "How it works"]
 
 
-def test_readme_opens_with_the_one_minute_summary_and_the_video_placeholder():
+def test_readme_opens_with_the_one_minute_summary():
     text = (ROOT / "README.md").read_text()
     minute = text.split("## In one minute", 1)[1].split("##", 1)[0]
     assert "All data is synthetic" in minute
-    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z*])", " ".join(minute.split("**Demo video")[0].split()))
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z*])", " ".join(minute.split()))
     assert 5 <= len([s for s in sentences if s]) <= 6
-    assert "**Demo video:**" in text.split("## Architecture")[0]
     assert "```mermaid" in text.split("## Results")[0]
 
 

@@ -15,8 +15,6 @@ unsafe proposal out of 30 in every configuration tested; a rule in code that for
 ambiguous cases brings that to 0, so that guarantee comes from the guard rail, not from the model.
 **All data is synthetic**, and Kafka, Snowflake and Airflow run at project scale, not in production.
 
-**Demo video:** link coming soon.
-
 ## Architecture
 
 ```mermaid
