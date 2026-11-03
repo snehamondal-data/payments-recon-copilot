@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "payments-recon-copilot"
-version = "0.5.0"
+version = "0.6.0"
 description = "Synthetic payments reconciliation pipeline with an AI copilot (fictional customer, synthetic data)."
 requires-python = ">=3.12"
 dependencies = [
