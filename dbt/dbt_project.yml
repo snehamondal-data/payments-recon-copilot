@@ -1,0 +1,30 @@
+name: recon
+version: "0.2.0"
+config-version: 2
+profile: recon
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+vars:
+  # The scenario's simulated "today". Set from AS_OF by the Makefile; never read from ground truth.
+  as_of: "2026-10-15"
+  # Mirrors recon.business_days.SETTLEMENT_WINDOW_BUSINESS_DAYS.
+  settlement_window_business_days: 2
+  # The business-day calendar covers 1000 days from here.
+  calendar_start: "2026-01-01"
+  # Ledger vs bank differences up to this many cents on a non-USD charge are FX rounding.
+  fx_rounding_tolerance_minor: 2
+
+models:
+  recon:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table

@@ -59,6 +59,17 @@ def test_loader_and_warehouse_code_never_reference_ground_truth(package):
         assert "recon.generator" not in text, path
 
 
+def test_dbt_project_never_reads_ground_truth():
+    dbt_dir = SRC.parents[1] / "dbt"
+    files = [p for p in dbt_dir.rglob("*") if p.suffix in {".sql", ".yml"}
+             and not {"target", "logs", "dbt_packages"} & set(p.relative_to(dbt_dir).parts)]
+    assert files
+    for path in files:
+        text = path.read_text().lower()
+        for forbidden in ("ground_truth", *GROUND_TRUTH_TABLES, "attach"):
+            assert forbidden not in text, f"{path} mentions {forbidden!r}"
+
+
 def test_settings_refuse_to_use_the_ground_truth_file_as_the_warehouse():
     with pytest.raises(ValueError):
         load_settings({"DUCKDB_PATH": "data/x.duckdb", "GROUND_TRUTH_PATH": "data/x.duckdb"})

@@ -1,0 +1,8 @@
+recon:
+  target: duckdb
+  outputs:
+    duckdb:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', 'data/warehouse.duckdb') }}"
+      threads: 4
+    # Slice 5 adds a snowflake target here. The models and tests stay the same.

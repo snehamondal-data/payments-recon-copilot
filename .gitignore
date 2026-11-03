@@ -36,3 +36,6 @@ logs/
 .DS_Store
 .vscode/
 .idea/
+
+# dbt per-machine anonymous user id
+.user.yml

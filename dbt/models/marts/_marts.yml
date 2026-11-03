@@ -1,0 +1,56 @@
+version: 2
+
+models:
+  - name: recon_exceptions
+    description: The exceptions queue the copilot works through. Grain is one row per exception_id.
+    columns:
+      - name: exception_id
+        data_tests: [unique, not_null]
+      - name: item_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [charge, bank_line]
+      - name: reason_code
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - ambiguous
+                  - duplicate_webhook
+                  - missing_ledger_entry
+                  - missing_settlement
+                  - chargeback
+                  - partial_refund_not_in_ledger
+                  - fee_mismatch
+                  - currency_rounding
+                  - ledger_amount_mismatch
+                  - date_mismatch
+                  - orphan_bank_deposit
+      - name: amount_minor
+        data_tests: [not_null]
+      - name: age_business_days
+        data_tests: [not_null]
+      - name: window_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [exception]
+  - name: recon_matches
+    description: Charges that tie out across all three sources. Grain is one row per charge_id.
+    columns:
+      - name: charge_id
+        data_tests: [unique, not_null]
+      - name: window_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [matched]
+  - name: recon_pending
+    description: Unsettled charges still inside their T+2 business-day window. Grain is one row per charge_id.
+    columns:
+      - name: charge_id
+        data_tests: [unique, not_null]
+      - name: business_days_left
+        data_tests: [not_null]

@@ -16,7 +16,8 @@ production deployment.
 | Slice | What | State |
 |---|---|---|
 | 1 | Data in: Kafka (KRaft), generator, contracts, DLQ, idempotent DuckDB loader | done |
-| 2 to 9 | Reconciliation, copilot, evals, Snowflake, Airflow, docs, PDFs, Kubernetes | not started |
+| 2 | Reconciliation: dbt staging, matching, `recon_matches`, `recon_exceptions`, `recon_pending` | done |
+| 3 to 9 | Copilot, evals, Snowflake, Airflow, docs, PDFs, Kubernetes | not started |
 
 ## Quickstart (Mac on Apple Silicon)
 
@@ -28,6 +29,7 @@ make up                # start Kafka in KRaft mode and create the topics
 make generate          # build the scenario (seed 42) and publish it
 make load              # load into data/warehouse.duckdb, stop at the end of each partition
 make replay            # re-read every topic from the start: inserts zero rows
+make recon             # dbt build: models plus dbt tests (as-of date from AS_OF)
 make test              # unit tests (no Docker needed)
 make test-integration  # end to end against the local broker
 make down              # stop Kafka and delete its data
@@ -45,14 +47,18 @@ Settings come from environment variables; see [.env.example](.env.example).
 - Until its deadline has passed, an unsettled charge is `pending_in_window`, **not** an exception. The
   generator plants a case whose deadline is the as-of date itself, to test the inclusive edge.
 
-The rule lives in [src/recon/business_days.py](src/recon/business_days.py).
+The rule lives in [src/recon/business_days.py](src/recon/business_days.py). The dbt models mirror it
+with a business-day calendar ([int_business_calendar.sql](dbt/models/intermediate/int_business_calendar.sql)),
+and a test checks that the SQL and Python give the same deadline for every day of the calendar.
 
 ## What Slice 1 builds
 
 ```
 generator ──► processor.events, bank.settlements, ledger.entries ──► loader ──► DuckDB raw.* tables
-                                                                       │
-                                            invalid messages ──► dlq topic + raw.dlq_log
+                                                                       │              │
+                                            invalid messages ──► dlq topic        dbt (Slice 2)
+                                                                 + raw.dlq_log        │
+                                                                    recon_matches, recon_exceptions, recon_pending
 ```
 
 **Topics.** Three source topics with 3 partitions each, plus `dlq`. Topic retention is unlimited
@@ -89,6 +95,74 @@ Each topic also has its own consistency checks:
 **Reference FX.** `ref.fx_rates` has a rate to USD for every currency on every day of the scenario. The
 processor converts at the rate for the event's UTC date. The planted rounding case is a ledger that
 rounds that same rate to 4 decimal places.
+
+## Reconciliation (Slice 2)
+
+The dbt project in [dbt/](dbt/) runs on DuckDB now and is written to run unchanged on Snowflake in Slice 5:
+
+- Dialect differences (UTC date of a timestamp, ISO day of week) sit behind `adapter.dispatch` macros
+  in [dbt/macros/portability.sql](dbt/macros/portability.sql), with a DuckDB and a Snowflake version each.
+- Everything else uses dbt's cross-database macros (`dateadd`, `concat`, `listagg`, `type_string`).
+- A test scans every model and dbt test for DuckDB-only syntax.
+
+```
+staging        stg_processor_events, stg_bank_settlement_lines, stg_ledger_journals, stg_fx_rates
+intermediate   int_business_calendar, int_processor_charges (+ T+2 deadline), int_bank_by_reference,
+               int_ledger_by_charge, int_unreferenced_line_candidates, int_unreferenced_lines,
+               int_charge_recon (reason_code + window_status), int_bank_line_exceptions
+marts          recon_matches, recon_exceptions, recon_pending
+```
+
+**Matching.** Charges are matched on `charge_id` across all three sources. For the bank, the match is
+on the line's `reference`.
+
+A bank settlement with no reference is matched on amount instead. A candidate charge has no referenced
+settlement of its own, the same expected net amount, and the line's value date inside its window.
+
+- Exactly one candidate: the line settles that charge.
+- No candidates: the line is an orphan.
+- More than one candidate: the line is `ambiguous`.
+
+**Window status.** Each charge is `matched`, `pending_in_window` or `exception`.
+
+- An unsettled charge becomes an exception (`missing_settlement`) only after its T+2 business-day
+  deadline has passed.
+- Until then it waits in `recon_pending`.
+
+**Reason codes**, checked in this priority order:
+
+| Reason code | Meaning |
+|---|---|
+| `ambiguous` | a deposit fits several charges, or a shortfall equals both an unbooked refund and a plausible fee error: escalate |
+| `duplicate_webhook` | the processor delivered the same charge more than once |
+| `missing_ledger_entry` | no sale journal |
+| `missing_settlement` | unsettled after the window closed |
+| `chargeback` | disputed and debited, with no ledger reversal |
+| `partial_refund_not_in_ledger` | processor refunds exceed ledger refunds |
+| `fee_mismatch` | bank net differs from gross minus the processor fee |
+| `currency_rounding` | ledger differs from bank by 1 or 2 cents on a non-USD charge |
+| `ledger_amount_mismatch` | ledger differs from bank in any other way |
+| `date_mismatch` | amounts tie, but the ledger dates it on a different day (timing only) |
+| `orphan_bank_deposit` | a bank line that names no known charge, or has no candidate |
+
+Each row of `recon_exceptions` has these fields:
+
+- `exception_id`: `charge:<id>` or `bank_line:<id>`.
+- `reason_code`.
+- `amount_minor`: the amount at stake, in USD cents (0 for `date_mismatch`).
+- `age_business_days`: business days since the charge date or value date, up to as-of.
+- `window_status`.
+- `related_charge_ids`: the candidate charges, for an ambiguous deposit.
+
+**Checks:**
+
+- dbt tests cover unique grain on every model, matched totals reconciling (row by row and in total),
+  late settlements never being exceptions, deadlines being T+2 business days, and every charge being
+  classified exactly once.
+- A pytest ([tests/test_reconciliation.py](tests/test_reconciliation.py)) loads a fresh warehouse and
+  runs `dbt build`. It then scores `recon_exceptions` against the ground-truth file: every planted case
+  must appear with the right reason code, the late settlements must not appear, and there must be no
+  unexplained exceptions.
 
 ## The scenario
 

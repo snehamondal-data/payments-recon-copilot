@@ -1,0 +1,44 @@
+version: 2
+
+models:
+  - name: int_business_calendar
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+  - name: int_processor_charges
+    columns:
+      - name: charge_id
+        data_tests: [unique, not_null]
+      - name: settlement_deadline
+        data_tests: [not_null]
+  - name: int_bank_by_reference
+    columns:
+      - name: reference
+        data_tests: [unique, not_null]
+  - name: int_ledger_by_charge
+    columns:
+      - name: charge_id
+        data_tests: [unique, not_null]
+  - name: int_unreferenced_line_candidates
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [line_id, charge_id]
+  - name: int_unreferenced_lines
+    columns:
+      - name: line_id
+        data_tests: [unique, not_null]
+  - name: int_bank_line_exceptions
+    columns:
+      - name: line_id
+        data_tests: [unique, not_null]
+  - name: int_charge_recon
+    columns:
+      - name: charge_id
+        data_tests: [unique, not_null]
+      - name: window_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [matched, pending_in_window, exception]

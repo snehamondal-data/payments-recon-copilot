@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Loaded from Kafka by recon.loader. Synthetic data.
+    schema: raw
+    tables:
+      - name: processor_events
+      - name: bank_settlement_batches
+      - name: bank_settlement_lines
+      - name: ledger_journals
+      - name: ledger_lines
+  - name: ref
+    schema: ref
+    tables:
+      - name: fx_rates
