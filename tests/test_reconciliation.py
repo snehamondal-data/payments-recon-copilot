@@ -19,6 +19,7 @@ import pytest
 from conftest import FakeDLQ, as_raw_messages, load_all
 from recon.business_days import settlement_deadline
 from recon.fx import read_fx_csv, write_fx_csv
+from recon.generator import build_scenario
 from recon.generator.ground_truth import write_ground_truth
 from recon.loader.schema import ensure_schema
 from recon.loader.sink import Sink, load_fx_rates
@@ -33,6 +34,16 @@ EXPECTED_REASON = {t: t.value for t in T} | {
     T.LATE_SETTLEMENT: None,
     T.DATE_BOUNDARY: "date_mismatch",
 }
+
+
+# Several seeds, so the matching logic is not fitted to one generated dataset.
+SEEDS = (42, 7, 123)
+
+
+@pytest.fixture(scope="module", params=SEEDS, ids=lambda seed: f"seed{seed}")
+def scenario(request):
+    """Overrides the session fixture in this module: every test below runs once per seed."""
+    return build_scenario(seed=request.param)
 
 
 @pytest.fixture(scope="module")
