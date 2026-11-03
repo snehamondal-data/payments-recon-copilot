@@ -62,8 +62,7 @@ def demo_review(store: CopilotStore, warehouse: ReadOnlyWarehouse, cases: list[E
 def review_metrics(store: CopilotStore, warehouse: ReadOnlyWarehouse) -> dict[str, Any]:
     """Backlog, acceptance rate and time to resolve, computed only from the audit log."""
     queue = {r["exception_id"]: r for r in warehouse.queue()}
-    log = store.con.execute(
-        "SELECT exception_id, run_id, event_type, payload, created_at FROM audit_log ORDER BY audit_id").fetchall()
+    log = store.log()
     first_seen: dict[str, Any] = {}
     resolved_at: dict[str, Any] = {}
     first_decision: dict[str, str] = {}

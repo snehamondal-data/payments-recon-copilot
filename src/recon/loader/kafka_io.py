@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from confluent_kafka import Consumer, KafkaError, Message, Producer
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 
+from confluent_kafka import Consumer, KafkaError, Message, Producer
+from confluent_kafka.admin import AdminClient, NewTopic
+
+from recon.config import DLQ_TOPIC, SOURCE_TOPICS
 from recon.contracts import DLQRecord
 
 
@@ -43,3 +49,21 @@ class KafkaDLQ:
     def _on_delivery(self, err: KafkaError | None, _msg: Message) -> None:
         if err is not None:
             self._errors.append(err)
+
+
+@contextmanager
+def scratch_topics(bootstrap: str, label: str) -> Iterator[str]:
+    """Freshly created, uniquely prefixed source and DLQ topics, deleted afterwards. Yields the prefix."""
+    admin = AdminClient({"bootstrap.servers": bootstrap})
+    admin.list_topics(timeout=10)  # fails fast if the broker is not up
+    prefix = f"{label}-{uuid.uuid4().hex[:8]}."
+    topics = [NewTopic(f"{prefix}{t}", num_partitions=3, replication_factor=1, config={"retention.ms": "-1"})
+              for t in SOURCE_TOPICS]
+    topics.append(NewTopic(f"{prefix}{DLQ_TOPIC}", num_partitions=1, replication_factor=1))
+    for future in admin.create_topics(topics).values():
+        future.result(30)
+    try:
+        yield prefix
+    finally:
+        for future in admin.delete_topics([t.topic for t in topics]).values():
+            future.result(30)

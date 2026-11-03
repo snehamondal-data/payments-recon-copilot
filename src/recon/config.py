@@ -17,6 +17,31 @@ def _flag(value: str) -> bool:
 
 
 @dataclass(frozen=True)
+class SnowflakeLogin:
+    user: str
+    role: str
+    key_path: Path  # unencrypted PKCS8 private key, in the git-ignored secrets/ folder
+
+
+@dataclass(frozen=True)
+class SnowflakeSettings:
+    """Two logins: the loader (writes RAW, REF, dbt schemas and COPILOT) and the agent (SELECT only)."""
+
+    account: str
+    warehouse: str
+    database: str
+    loader: SnowflakeLogin
+    agent: SnowflakeLogin
+
+    def __post_init__(self) -> None:
+        if self.loader.user.upper() == self.agent.user.upper() or self.loader.role.upper() == self.agent.role.upper():
+            raise ValueError("the loader and the agent must be different Snowflake users with different roles")
+
+
+WAREHOUSE_ENGINES = ("duckdb", "snowflake")
+
+
+@dataclass(frozen=True)
 class Settings:
     kafka_bootstrap: str
     topic_prefix: str
@@ -32,8 +57,13 @@ class Settings:
     copilot_timeout_s: float = 90.0
     copilot_hide_reason_code: bool = False
     copilot_effort: str = "medium"
+    # Snowflake (Slice 5). The engine picks where the loader writes and where the copilot reads.
+    warehouse_engine: str = "duckdb"
+    snowflake: SnowflakeSettings | None = None
 
     def __post_init__(self) -> None:
+        if self.warehouse_engine not in WAREHOUSE_ENGINES:
+            raise ValueError(f"WAREHOUSE_ENGINE must be one of {WAREHOUSE_ENGINES}, not {self.warehouse_engine!r}")
         # The warehouse must never be the ground-truth file, or the agent could read the answers.
         files = {"DUCKDB_PATH": self.duckdb_path, "GROUND_TRUTH_PATH": self.ground_truth_path,
                  "COPILOT_DB_PATH": self.copilot_db_path}
@@ -64,4 +94,16 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         copilot_timeout_s=float(env.get("COPILOT_TIMEOUT_S", "90")),
         copilot_hide_reason_code=_flag(env.get("COPILOT_HIDE_REASON_CODE", "false")),
         copilot_effort=env.get("COPILOT_EFFORT", "medium"),
+        warehouse_engine=env.get("WAREHOUSE_ENGINE", "duckdb"),
+        snowflake=SnowflakeSettings(
+            account=env.get("SNOWFLAKE_ACCOUNT", ""),
+            warehouse=env.get("SNOWFLAKE_WAREHOUSE", "RECON_WH"),
+            database=env.get("SNOWFLAKE_DATABASE", "RECON"),
+            loader=SnowflakeLogin(env.get("SNOWFLAKE_LOADER_USER", "RECON_LOADER"),
+                                  env.get("SNOWFLAKE_LOADER_ROLE", "RECON_LOADER_ROLE"),
+                                  Path(env.get("SNOWFLAKE_LOADER_KEY_PATH", "secrets/recon_loader_rsa_key.p8"))),
+            agent=SnowflakeLogin(env.get("SNOWFLAKE_AGENT_USER", "RECON_AGENT"),
+                                 env.get("SNOWFLAKE_AGENT_ROLE", "RECON_AGENT_ROLE"),
+                                 Path(env.get("SNOWFLAKE_AGENT_KEY_PATH", "secrets/recon_agent_rsa_key.p8"))),
+        ),
     )

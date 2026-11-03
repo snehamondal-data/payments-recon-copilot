@@ -9,6 +9,8 @@ import duckdb
 
 
 class DuckDBClient:
+    dialect = "duckdb"
+
     def __init__(self, path: str | Path = ":memory:"):
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)

@@ -1,4 +1,4 @@
-"""Kafka -> DuckDB loader: contract validation, DLQ routing, idempotent inserts."""
+"""Kafka -> warehouse (DuckDB or Snowflake) loader: contract validation, DLQ routing, idempotent inserts."""
 
 from __future__ import annotations
 

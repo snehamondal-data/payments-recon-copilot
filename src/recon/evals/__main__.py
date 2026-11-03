@@ -62,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--run", required=True)
     sub.add_parser("report", help="markdown tables for the README")
     args = parser.parse_args(argv)
+    if settings.warehouse_engine != "duckdb":
+        # Evals spend API budget per run; they are measured once, on DuckDB. Snowflake parity is checked
+        # without the model (python -m recon.parity).
+        print("evals run on DuckDB only; unset WAREHOUSE_ENGINE")
+        return 2
 
     warehouse = ReadOnlyWarehouse(settings.duckdb_path, forbidden_paths=settings.agent_forbidden_paths())
     try:

@@ -2,6 +2,8 @@
 
 The agent never writes SQL. Each tool validates its arguments with pydantic, runs one fixed
 parameterised SELECT on a read-only connection, and returns records that each carry a record_id.
+The same SELECTs run on DuckDB (a read-only, locked-down file connection) or on Snowflake (as
+RECON_AGENT_ROLE, which has SELECT on RAW, REF and MARTS and nothing else).
 Record text (bank references, descriptions) is returned as data; the system prompt tells the model
 never to treat it as instructions, and the safety contract is enforced in code either way.
 """
@@ -19,6 +21,8 @@ from typing import Annotated, Any, Literal
 
 import duckdb
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from recon.config import SnowflakeSettings
 
 MAX_ROWS = 50
 ChargeId = Annotated[str, Field(pattern=r"^ch_[0-9a-f]{16}$", description="A processor charge ID, e.g. ch_0123456789abcdef.")]
@@ -129,14 +133,39 @@ class ReadOnlyWarehouse:
                 raise ValueError(f"refusing to open {path}: it is not the warehouse")
         self.con = open_read_only(path)
         self.hide_reason_code = hide_reason_code
+        self.engine = "duckdb"
+
+    @classmethod
+    def snowflake(cls, sf: SnowflakeSettings, *, hide_reason_code: bool = False) -> ReadOnlyWarehouse:
+        """Logs in as the agent user, never the loader: connect() refuses a session without RECON_AGENT_ROLE."""
+        from recon.warehouse.snowflake_client import connect
+
+        self = cls.__new__(cls)
+        self.con = connect(sf, sf.agent)
+        self.hide_reason_code = hide_reason_code
+        self.engine = "snowflake"
+        return self
 
     def close(self) -> None:
         self.con.close()
 
+    def _query(self, sql: str, params: tuple = (), limit: int | None = None) -> list[dict[str, Any]]:
+        if self.engine == "duckdb":
+            cur = self.con.execute(sql, params)
+        else:
+            from recon.warehouse.snowflake_client import to_pyformat
+
+            cur = self.con.cursor()
+            if params:
+                cur.execute(to_pyformat(sql), list(params))
+            else:
+                cur.execute(sql)
+        names = [d[0].lower() for d in cur.description]  # Snowflake returns unquoted names in upper case
+        rows = cur.fetchmany(limit) if limit else cur.fetchall()
+        return [{n: _jsonable(v) for n, v in zip(names, row)} for row in rows]
+
     def _rows(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-        cur = self.con.execute(sql, params)
-        names = [d[0] for d in cur.description]
-        return [{n: _jsonable(v) for n, v in zip(names, row)} for row in cur.fetchmany(MAX_ROWS)]
+        return self._query(sql, params, MAX_ROWS)
 
     # Internal lookups for the agent loop and the CLI. Never exposed to the model.
 
@@ -145,12 +174,10 @@ class ReadOnlyWarehouse:
         return rows[0] if rows else None
 
     def queue(self) -> list[dict[str, Any]]:
-        cur = self.con.execute("SELECT * FROM marts.recon_exceptions ORDER BY item_date, exception_id")
-        names = [d[0] for d in cur.description]
-        return [{n: _jsonable(v) for n, v in zip(names, row)} for row in cur.fetchall()]
+        return self._query("SELECT * FROM marts.recon_exceptions ORDER BY item_date, exception_id")
 
     def as_of(self) -> str:
-        return str(self.con.execute("SELECT max(as_of_date) FROM marts.recon_exceptions").fetchone()[0])
+        return self._query("SELECT max(as_of_date) AS as_of FROM marts.recon_exceptions")[0]["as_of"]
 
     # The six tools.
 

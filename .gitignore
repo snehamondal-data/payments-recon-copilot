@@ -39,3 +39,7 @@ logs/
 
 # dbt per-machine anonymous user id
 .user.yml
+
+# Snowflake key pairs and rendered setup SQL (never commit)
+secrets/
+*.p8

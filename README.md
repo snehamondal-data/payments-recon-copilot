@@ -8,8 +8,8 @@ A reconciliation pipeline for three sources that never quite agree (the payment 
 the internal ledger), with an AI copilot that will investigate the exceptions and propose fixes for a
 human to approve. The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
 
-Kafka, and later Snowflake and Airflow, are used at **project scale**: a single local broker, not a
-production deployment.
+Kafka and Snowflake (and later Airflow) are used at **project scale**: a single local broker and one
+Snowflake trial account with one XSMALL warehouse, not a production deployment.
 
 ## Status
 
@@ -19,7 +19,8 @@ production deployment.
 | 2 | Reconciliation: dbt staging, matching, `recon_matches`, `recon_exceptions`, `recon_pending` | done |
 | 3 | Copilot: typed read-only tools, validated tool-use loop, review CLI, audit log | done |
 | 4 | Evals and metrics: scored against ground truth, dev and held-out, unsafe proposals counted | done |
-| 5 to 9 | Snowflake, Airflow, docs, PDFs, Kubernetes | not started |
+| 5 | Snowflake: the same loader, dbt project and agent tools on a second engine, with a parity check | done |
+| 6 to 9 | Airflow, docs, PDFs, Kubernetes | not started |
 
 ## Quickstart (Mac on Apple Silicon)
 
@@ -36,6 +37,16 @@ make test              # unit tests (no Docker, no API calls)
 make test-integration  # end to end against the local broker
 make test-live         # one real Claude call (needs ANTHROPIC_API_KEY in .env; costs a few cents)
 make down              # stop Kafka and delete its data
+```
+
+Snowflake (Slice 5; needs the setup below and the `SNOWFLAKE_*` settings in `.env`):
+
+```bash
+WAREHOUSE_ENGINE=snowflake make load    # Kafka -> RECON.RAW as the loader user
+make recon-snowflake                    # dbt build --target snowflake
+make parity                             # the whole pipeline on both engines, then compare
+make test-snowflake                     # replay, reconciliation and role tests on Snowflake (uses credits)
+WAREHOUSE_ENGINE=snowflake .venv/bin/python -m recon.copilot queue
 ```
 
 Settings come from environment variables; see [.env.example](.env.example).
@@ -101,7 +112,7 @@ rounds that same rate to 4 decimal places.
 
 ## Reconciliation (Slice 2)
 
-The dbt project in [dbt/](dbt/) runs on DuckDB now and is written to run unchanged on Snowflake in Slice 5:
+The dbt project in [dbt/](dbt/) runs unchanged on DuckDB and on Snowflake (Slice 5 needed no model changes):
 
 - Dialect differences (UTC date of a timestamp, ISO day of week) sit behind `adapter.dispatch` macros
   in [dbt/macros/portability.sql](dbt/macros/portability.sql), with a DuckDB and a Snowflake version each.
@@ -237,6 +248,87 @@ log records every tool call with its arguments, every raw model output, any vali
 policy override, the final diagnosis, and every review decision, each with a timestamp. Unit tests
 use a scripted fake model, so they make no API calls and cost nothing. The model and the key come
 from `.env` (`RECON_MODEL`, default `claude-sonnet-5-5`; `ANTHROPIC_API_KEY`).
+
+## Snowflake (Slice 5)
+
+The same pipeline on a second engine: Kafka, the same loader, the same dbt models and tests, and the same
+six agent tools, on a Snowflake trial account. This is **project-scale**: one account, one XSMALL warehouse
+(`AUTO_SUSPEND = 60`) and a resource monitor that suspends it at 10 credits a month. The data is the same
+synthetic seed-42 scenario. Pick the engine with `WAREHOUSE_ENGINE=duckdb|snowflake` (default `duckdb`).
+
+**Setup.** [snowflake/setup.sql](snowflake/setup.sql) is run once by an admin in a Snowsight worksheet:
+
+1. Generate one RSA key pair per service user into `secrets/` (git-ignored):
+   ```bash
+   mkdir -m 700 -p secrets
+   for u in loader agent; do
+     openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out secrets/recon_${u}_rsa_key.p8
+     openssl rsa -in secrets/recon_${u}_rsa_key.p8 -pubout -out secrets/recon_${u}_rsa_key.pub
+   done
+   chmod 600 secrets/*
+   ```
+2. Run `python snowflake/render_setup.py` to fill in the public keys.
+3. Run the rendered file as ACCOUNTADMIN.
+
+It creates the database `RECON` with schemas `RAW`, `REF`, `STAGING`, `INTERMEDIATE`, `MARTS` and
+`COPILOT`, plus two roles and two `TYPE = SERVICE` users. Service users authenticate with their key pair
+and cannot log in with a password. No private key or account identifier is committed; they live in
+`secrets/` and `.env`.
+
+| | `RECON_LOADER_ROLE` (user `RECON_LOADER`) | `RECON_AGENT_ROLE` (user `RECON_AGENT`) |
+|---|---|---|
+| RAW, REF | create and write tables (the loader) | SELECT only, including future tables |
+| STAGING, INTERMEDIATE, MARTS | create tables and views (dbt) | MARTS: SELECT only. STAGING, INTERMEDIATE: nothing |
+| COPILOT | create and write the audit log and resolutions | nothing, not even SELECT |
+
+Every connection from Python turns secondary roles off (`USE SECONDARY ROLES NONE`). It then checks
+that the session holds exactly its one role and refuses to continue otherwise. This came out of the
+role tests: new Snowflake users default to `DEFAULT_SECONDARY_ROLES = ('ALL')`, so an agent session
+would quietly gain any role granted to that user later. The setup SQL also sets the default to none.
+
+**Loader.** `SnowflakeClient` implements the same `WarehouseClient` interface as DuckDB, so the
+Kafka -> loader -> warehouse path is unchanged. Snowflake does not enforce primary keys, so where
+DuckDB uses `INSERT ... ON CONFLICT DO NOTHING`, Snowflake uses one
+`MERGE ... WHEN NOT MATCHED THEN INSERT` per 500-row chunk, keyed on the same columns (`event_id`, or
+`event_id, line_no` for lines). A replay from the earliest offset re-reads all 1,672 messages and inserts
+**0 rows**.
+
+**dbt.** A `snowflake` target in [dbt/profiles.yml](dbt/profiles.yml) runs as the loader with its key.
+No model, test or macro changed. The portability macros written in Slice 2 were enough.
+
+**Agent.** On Snowflake, `ReadOnlyWarehouse` logs in as `RECON_AGENT`, and the tools run the same SELECTs.
+Read-only is enforced by grants, and the tests prove it: as the agent role, every INSERT, UPDATE,
+DELETE, MERGE, CREATE TABLE, CREATE VIEW, CREATE SCHEMA and GRANT fails with a privilege error, and so
+does any SELECT on COPILOT, STAGING or INTERMEDIATE. The copilot store writes the audit log and
+resolutions to `RECON.COPILOT` as the loader user, never the agent. The query history confirms every
+audit insert ran as `RECON_LOADER_ROLE`. Ground truth stays a local DuckDB file and is never uploaded.
+
+**Parity.** `make parity` publishes the scenario to fresh Kafka topics, loads them through the real
+loader into a new DuckDB file and into an emptied `RECON.RAW`, runs `dbt build` on both, and compares
+the two engines. It reads both sides through the agent's own connection. Measured on seed 42
+([snowflake/parity_results.md](snowflake/parity_results.md)):
+
+| | DuckDB | Snowflake |
+|---|---|---|
+| Raw rows loaded (5 source tables), DLQ log, FX rates | 3,851, 8, 54 | 3,851, 8, 54 |
+| dbt build | 15 models, 44 tests pass | 15 models, 44 tests pass |
+| `recon_exceptions` | 30 rows | 30 rows: same IDs, reason codes and amounts, and every other column |
+| `recon_matches`, `recon_pending` | 500, 3 | 500, 3 (same charge IDs) |
+| Agent tool outputs for every exception | 161 calls | 161 calls, byte-identical JSON |
+| Load, dbt build | 7.8s, 7.3s | 32.1s, 22.3s |
+
+The reconciliation pytest also runs against Snowflake, with the same assertions against ground truth
+(`make test-snowflake`, 34 tests). One test is left out: the duplicate-column check exists because
+DuckDB silently renames a duplicate column, and Snowflake rejects one at build time instead.
+
+**Not run on Snowflake:** the evals. They cost API budget and measure the model, not the engine, and
+the tool outputs are identical on both engines. `python -m recon.evals` refuses to run with
+`WAREHOUSE_ENGINE=snowflake`. One live diagnosis was run on Snowflake instead, on fee-mismatch
+`charge:ch_cb4addc685096c78`:
+
+- **Result:** correct root cause (`fee_mismatch`), the right action (`raise_fee_claim_with_processor`)
+  at confidence 0.85, with all four records cited.
+- **Cost:** 4 tool calls, about 7s, $0.018.
 
 ## Results
 

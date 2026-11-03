@@ -174,6 +174,8 @@ class FakeConsumer:
 
 
 class RecordingWarehouse:
+    dialect = "duckdb"
+
     def __init__(self, wh, events):
         self._wh, self.events = wh, events
 

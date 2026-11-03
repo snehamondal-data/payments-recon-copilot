@@ -85,6 +85,15 @@ SOURCE_TABLES = (
 )
 
 
+def ddl(dialect: str) -> list[str]:
+    """The same tables on Snowflake, with its type names. Its schemas come from snowflake/setup.sql, and its
+    primary keys are not enforced (the loader's MERGE on the same key columns is what keeps them unique)."""
+    if dialect == "duckdb":
+        return DDL
+    return [s.replace("TIMESTAMPTZ", "TIMESTAMP_TZ").replace("BLOB", "BINARY")
+            for s in DDL if not s.startswith("CREATE SCHEMA")]
+
+
 def ensure_schema(wh: WarehouseClient) -> None:
-    for statement in DDL:
+    for statement in ddl(wh.dialect):
         wh.execute(statement)

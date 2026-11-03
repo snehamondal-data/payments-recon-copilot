@@ -121,14 +121,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def open_warehouse(settings: Settings) -> ReadOnlyWarehouse:
+    """WAREHOUSE_ENGINE=snowflake reads as RECON_AGENT_ROLE; otherwise the read-only DuckDB file."""
+    if settings.warehouse_engine == "snowflake":
+        return ReadOnlyWarehouse.snowflake(settings.snowflake, hide_reason_code=settings.copilot_hide_reason_code)
+    return ReadOnlyWarehouse(settings.duckdb_path, forbidden_paths=settings.agent_forbidden_paths(),
+                             hide_reason_code=settings.copilot_hide_reason_code)
+
+
+def open_store(settings: Settings) -> CopilotStore:
+    """WAREHOUSE_ENGINE=snowflake writes RECON.COPILOT as the loader, never the agent; otherwise copilot.duckdb."""
+    if settings.warehouse_engine == "snowflake":
+        return CopilotStore.snowflake(settings.snowflake)
+    return CopilotStore(settings.copilot_db_path)
+
+
 def main(argv: list[str] | None = None, *, settings: Settings | None = None,
          client_factory: Callable[[Settings], ModelClient] | None = None, out: Callable[[str], None] = print) -> int:
     load_dotenv()  # ANTHROPIC_API_KEY and RECON_MODEL live in .env; never in code
     settings = settings or load_settings()
     args = build_parser().parse_args(argv)
-    warehouse = ReadOnlyWarehouse(settings.duckdb_path, forbidden_paths=settings.agent_forbidden_paths(),
-                                  hide_reason_code=settings.copilot_hide_reason_code)
-    store = CopilotStore(settings.copilot_db_path)
+    warehouse = open_warehouse(settings)
+    store = open_store(settings)
     try:
         if args.command == "queue":
             out(render_queue(warehouse, store, args.status))

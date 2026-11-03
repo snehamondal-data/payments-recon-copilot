@@ -5,4 +5,17 @@ recon:
       type: duckdb
       path: "{{ env_var('DUCKDB_PATH', 'data/warehouse.duckdb') }}"
       threads: 4
-    # Slice 5 adds a snowflake target here. The models and tests stay the same.
+    # Same models and tests on Snowflake (project-scale trial). Runs as the loader: key-pair auth, no password.
+    # Schemas are the custom names as-is (generate_schema_name), so STAGING, INTERMEDIATE and MARTS.
+    snowflake:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
+      user: "{{ env_var('SNOWFLAKE_LOADER_USER', 'RECON_LOADER') }}"
+      role: "{{ env_var('SNOWFLAKE_LOADER_ROLE', 'RECON_LOADER_ROLE') }}"
+      authenticator: snowflake_jwt
+      private_key_path: "{{ env_var('SNOWFLAKE_LOADER_KEY_PATH', 'secrets/recon_loader_rsa_key.p8') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'RECON') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'RECON_WH') }}"
+      schema: STAGING
+      threads: 4
+      query_tag: payments-recon-copilot

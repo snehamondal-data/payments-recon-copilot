@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "payments-recon-copilot"
-version = "0.3.0"
+version = "0.4.0"
 description = "Synthetic payments reconciliation pipeline with an AI copilot (fictional customer, synthetic data)."
 requires-python = ">=3.12"
 dependencies = [
@@ -12,9 +12,11 @@ dependencies = [
     "confluent-kafka~=2.16",
     # 1.4 is DuckDB's LTS line. 2.0.0 prints spurious nanobind "leaked" warnings at interpreter exit.
     "duckdb>=1.4,<1.5",
-    # dbt-duckdb 1.11 supports DuckDB 1.4. Slice 5 adds the matching dbt-snowflake.
+    # dbt-duckdb 1.11 supports DuckDB 1.4. dbt-snowflake 1.12 matches dbt-core 1.12 (arm64 wheels throughout).
     "dbt-core~=1.12.6",
     "dbt-duckdb~=1.11.1",
+    "dbt-snowflake~=1.12.4",
+    "snowflake-connector-python~=4.8",
     "pydantic~=2.14",
     "python-dotenv~=1.2",
 ]
@@ -30,5 +32,6 @@ testpaths = ["tests"]
 markers = [
     "integration: needs the local Kafka broker from docker compose (make up)",
     "live: calls the real Anthropic API (costs money; needs ANTHROPIC_API_KEY in .env)",
+    "snowflake: runs against the Snowflake trial account (uses credits; needs the SNOWFLAKE_* settings in .env)",
 ]
-addopts = "-m 'not integration and not live'"
+addopts = "-m 'not integration and not live and not snowflake'"

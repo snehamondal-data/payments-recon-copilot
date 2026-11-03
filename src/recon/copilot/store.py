@@ -1,4 +1,7 @@
-"""data/copilot.duckdb: the append-only audit log and the resolution records.
+"""The append-only audit log and the resolution records: data/copilot.duckdb, or RECON.COPILOT on Snowflake.
+
+On Snowflake the store writes as the loader user (RECON_LOADER_ROLE). The agent role has no grant on
+COPILOT at all, so the agent can neither read its own audit trail nor write a resolution.
 
 Nothing here ever updates or deletes a row. Current state (the latest proposal for an exception and
 whether it was reviewed) is derived from the log. Source data lives in the warehouse and is never
@@ -14,10 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import duckdb
-
+from recon.config import SnowflakeSettings
 from recon.copilot.agent import RunResult
 from recon.copilot.contract import ALLOWED_ACTIONS, ProposedAction, RootCause
+from recon.warehouse import DuckDBClient, WarehouseClient
 
 DDL = [
     "CREATE SEQUENCE IF NOT EXISTS audit_id_seq",
@@ -43,6 +46,17 @@ DDL = [
         reason VARCHAR NOT NULL,
         applied_at TIMESTAMPTZ NOT NULL)""",
 ]
+# Snowflake: an ORDER sequence (new accounts default to NOORDER, and the log is read in audit_id order),
+# VARIANT for JSON, and its own timestamp type name.
+SNOWFLAKE_DDL = [
+    DDL[0] + " ORDER",
+    DDL[1].replace("DEFAULT nextval('audit_id_seq')", "DEFAULT audit_id_seq.NEXTVAL")
+          .replace("JSON", "VARIANT").replace("TIMESTAMPTZ", "TIMESTAMP_TZ"),
+    DDL[2].replace("JSON", "VARIANT").replace("TIMESTAMPTZ", "TIMESTAMP_TZ"),
+]
+AUDIT_COLUMNS = ("audit_id", "exception_id", "run_id", "event_type", "model", "prompt_version", "payload", "created_at")
+RESOLUTION_COLUMNS = ("resolution_id", "exception_id", "run_id", "source", "root_cause", "action", "amount_minor",
+                      "record_ids", "decided_by", "reason", "applied_at")
 
 EVENT_TYPES = ("run_started", "tool_call", "model_output", "validation_failed", "policy_override", "diagnosis",
                "review", "resolution_applied")
@@ -71,32 +85,38 @@ def _now() -> datetime:
 
 
 class CopilotStore:
-    def __init__(self, path: Path | str = ":memory:"):
-        if str(path) != ":memory:":
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.con = duckdb.connect(str(path))
-        for statement in DDL:
-            self.con.execute(statement)
+    def __init__(self, path: Path | str | WarehouseClient = ":memory:"):
+        self.db: WarehouseClient = path if hasattr(path, "dialect") else DuckDBClient(path)
+        # A JSON parameter: DuckDB casts the string itself; Snowflake needs PARSE_JSON, which only works in
+        # a SELECT (not in VALUES), so every insert below is INSERT ... SELECT.
+        self._json = "PARSE_JSON(?)" if self.db.dialect == "snowflake" else "?"
+        for statement in SNOWFLAKE_DDL if self.db.dialect == "snowflake" else DDL:
+            self.db.execute(statement)
+
+    @classmethod
+    def snowflake(cls, sf: SnowflakeSettings) -> CopilotStore:
+        from recon.warehouse.snowflake_client import SnowflakeClient
+
+        return cls(SnowflakeClient(sf, sf.loader, schema="COPILOT"))
 
     def close(self) -> None:
-        self.con.close()
+        self.db.close()
 
     # --- writing (insert only) ----------------------------------------------
 
     def _append(self, exception_id: str, event_type: str, payload: dict[str, Any], *, run_id: str | None = None,
                 model: str | None = None, prompt_version: str | None = None, at: datetime | None = None) -> None:
         assert event_type in EVENT_TYPES, event_type
-        self.con.execute(
+        self.db.execute(
             "INSERT INTO audit_log (exception_id, run_id, event_type, model, prompt_version, payload, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            f"SELECT ?, ?, ?, ?, ?, {self._json}, ?",
             (exception_id, run_id, event_type, model, prompt_version, json.dumps(payload, default=str), at or _now()))
 
     def record_run(self, run: RunResult) -> None:
         """Write one investigation to the log, in the order it happened."""
         meta = dict(run_id=run.run_id, model=run.model, prompt_version=run.prompt_version)
         eid = run.exception_id
-        self.con.begin()
-        try:
+        with self.db.transaction():
             self._append(eid, "run_started", {"hide_reason_code": run.hide_reason_code,
                                               "escalation_floor": run.escalation_floor_active,
                                               "started_at": run.started_at}, at=run.started_at, **meta)
@@ -123,10 +143,6 @@ class CopilotStore:
                 "latency_s": run.latency_s,
                 "finished_at": run.finished_at,
             }, at=run.finished_at, **meta)
-            self.con.commit()
-        except BaseException:
-            self.con.rollback()
-            raise
 
     def approve(self, exception_id: str, *, reviewer: str, reason: str, amount_minor: int | None) -> str:
         p = self._reviewable(exception_id)
@@ -166,22 +182,18 @@ class CopilotStore:
                  decision) -> str:
         resolution_id = f"res_{uuid.uuid4().hex[:16]}"
         at = _now()
-        self.con.begin()
-        try:
+        with self.db.transaction():
             self._append(p.exception_id, "review", {"decision": decision, "reviewer": reviewer, "reason": reason,
                                                     "action": action, "root_cause": root_cause},
                          run_id=p.run_id, model=p.model, at=at)
-            self.con.execute(
-                "INSERT INTO resolutions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            self.db.execute(
+                f"INSERT INTO resolutions ({', '.join(RESOLUTION_COLUMNS)}) "
+                f"SELECT ?, ?, ?, ?, ?, ?, ?, {self._json}, ?, ?, ?",
                 (resolution_id, p.exception_id, p.run_id, source, root_cause, action, amount_minor,
                  json.dumps(record_ids), reviewer, reason, at))
             self._append(p.exception_id, "resolution_applied", {"resolution_id": resolution_id, "source": source,
                                                                 "action": action},
                          run_id=p.run_id, model=p.model, at=at)
-            self.con.commit()
-        except BaseException:
-            self.con.rollback()
-            raise
         return resolution_id
 
     def _reviewable(self, exception_id: str) -> Proposal:
@@ -195,28 +207,32 @@ class CopilotStore:
     # --- reading --------------------------------------------------------------
 
     def latest_proposal(self, exception_id: str) -> Proposal | None:
-        row = self.con.execute(
+        rows = self.db.execute(
             "SELECT run_id, model, payload, created_at FROM audit_log WHERE exception_id = ? "
-            "AND event_type = 'diagnosis' ORDER BY audit_id DESC LIMIT 1", (exception_id,)).fetchone()
-        if row is None:
+            "AND event_type = 'diagnosis' ORDER BY audit_id DESC LIMIT 1", (exception_id,))
+        if not rows:
             return None
-        run_id, model, payload, created_at = row
+        run_id, model, payload, created_at = rows[0]
         payload = json.loads(payload)
-        review_row = self.con.execute(
+        review_rows = self.db.execute(
             "SELECT payload FROM audit_log WHERE run_id = ? AND event_type = 'review' ORDER BY audit_id DESC LIMIT 1",
-            (run_id,)).fetchone()
-        review = json.loads(review_row[0]) if review_row else None
+            (run_id,))
+        review = json.loads(review_rows[0][0]) if review_rows else None
         status = "proposed" if review is None else review["decision"]
         return Proposal(run_id, exception_id, model, payload["diagnosis"], payload["is_fallback"],
                         payload["fallback_reason"], payload["policy_override"], created_at, status, review)
 
+    def log(self) -> list[tuple]:
+        """Every event, oldest first: (exception_id, run_id, event_type, payload JSON text, created_at)."""
+        return self.db.execute(
+            "SELECT exception_id, run_id, event_type, payload, created_at FROM audit_log ORDER BY audit_id")
+
     def events(self, *, run_id: str | None = None, exception_id: str | None = None) -> list[dict[str, Any]]:
         where, params = ("run_id = ?", (run_id,)) if run_id else ("exception_id = ?", (exception_id,))
-        cur = self.con.execute(f"SELECT * FROM audit_log WHERE {where} ORDER BY audit_id", params)
-        names = [d[0] for d in cur.description]
-        return [dict(zip(names, r)) | {"payload": json.loads(r[names.index("payload")])} for r in cur.fetchall()]
+        rows = self.db.execute(f"SELECT {', '.join(AUDIT_COLUMNS)} FROM audit_log WHERE {where} ORDER BY audit_id",
+                               params)
+        return [dict(zip(AUDIT_COLUMNS, r)) | {"payload": json.loads(r[AUDIT_COLUMNS.index("payload")])} for r in rows]
 
     def resolutions(self) -> list[dict[str, Any]]:
-        cur = self.con.execute("SELECT * FROM resolutions ORDER BY applied_at")
-        names = [d[0] for d in cur.description]
-        return [dict(zip(names, r)) for r in cur.fetchall()]
+        rows = self.db.execute(f"SELECT {', '.join(RESOLUTION_COLUMNS)} FROM resolutions ORDER BY applied_at")
+        return [dict(zip(RESOLUTION_COLUMNS, r)) for r in rows]
