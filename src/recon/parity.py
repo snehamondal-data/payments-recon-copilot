@@ -37,7 +37,8 @@ from recon.warehouse import DuckDBClient, WarehouseClient
 
 ROOT = Path(__file__).resolve().parents[2]
 DBT_DIR = ROOT / "dbt"
-DBT = Path(sys.executable).parent / "dbt"
+# The dbt next to this Python, or DBT_BIN (in the Airflow image dbt lives in its own venv).
+DBT = Path(os.environ.get("DBT_BIN", Path(sys.executable).parent / "dbt"))
 WORK_DIR = ROOT / "data" / "parity"
 RESULTS = ROOT / "snowflake" / "parity_results.md"
 RAW_TABLES = (*(f"raw.{t}" for t in SOURCE_TABLES), "raw.dlq_log", "ref.fx_rates")

@@ -1,0 +1,9 @@
+astro
+.git
+.env
+airflow_settings.yaml
+logs/
+# Belt and braces: keys must never end up in the build context.
+secrets/
+*.p8
+*.pem

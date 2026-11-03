@@ -1,0 +1,31 @@
+# Runtime-only additions to `astro dev start`. Nothing here is baked into the image.
+#
+# Tasks run in the scheduler container (LocalExecutor), so only the scheduler gets the recon code,
+# the dbt project, the reference FX rates, the settings from ../.env and the Snowflake keys, all read-only.
+# The DAG files themselves import nothing from recon at parse time, so the other containers need none of it.
+# The scheduler also joins Kafka's compose network and uses the broker's internal listener.
+services:
+  scheduler:
+    volumes:
+      - ../src:/opt/recon/src:ro
+      - ../dbt:/opt/recon/dbt:ro
+      - ../data/ref:/opt/recon/data/ref:ro
+      - ../secrets:/opt/recon/secrets:ro
+    env_file:
+      - ../.env
+    environment:
+      PYTHONPATH: /opt/recon/src
+      WAREHOUSE_ENGINE: snowflake
+      KAFKA_BOOTSTRAP: kafka:19092
+      TOPIC_PREFIX: ""
+      FX_RATES_PATH: /opt/recon/data/ref/fx_rates.csv
+      SNOWFLAKE_LOADER_KEY_PATH: /opt/recon/secrets/recon_loader_rsa_key.p8
+      SNOWFLAKE_AGENT_KEY_PATH: /opt/recon/secrets/recon_agent_rsa_key.p8
+    networks:
+      - airflow
+      - recon_kafka
+
+networks:
+  recon_kafka:
+    external: true
+    name: recon_default

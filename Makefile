@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 -include .env
 export
 
-.PHONY: venv up down generate load replay recon recon-snowflake parity test test-integration test-live test-snowflake eval-estimate eval-report
+.PHONY: venv up down generate load replay recon recon-snowflake parity test test-integration test-live test-snowflake eval-estimate eval-report airflow-up airflow-down airflow-test airflow-backfill airflow-report
 
 venv:
 	python3 -m venv .venv
@@ -55,3 +55,24 @@ eval-estimate:
 
 eval-report:
 	$(PY) -m recon.evals report
+
+# Airflow (Slice 6, Astro CLI, project-scale). Needs `make up` first: the scheduler joins Kafka's network.
+airflow-up:
+	cd airflow && astro dev start --no-browser
+
+airflow-down:
+	cd airflow && astro dev stop
+
+airflow-test:
+	cd airflow && astro dev pytest tests/dags
+
+FROM ?= 2026-10-15
+TO ?= 2026-10-20
+# One run at a time: the marts hold one as-of date. Re-running a date is safe.
+airflow-backfill:
+	cd airflow && astro dev run backfill create --dag-id recon_daily --from-date $(FROM) --to-date $(TO) \
+		--max-active-runs 1 --reprocess-behavior completed
+
+# What each recon_daily run recorded on Snowflake (pending, closed windows, backlog), per as-of date.
+airflow-report:
+	$(PY) -m recon.orchestration report --from $(FROM) --to $(TO)

@@ -1,0 +1,8 @@
+# What the recon package needs at task runtime (it is mounted at /opt/recon/src, not installed).
+# dbt is not here: it has its own venv (see Dockerfile).
+confluent-kafka~=2.16
+snowflake-connector-python~=4.8
+duckdb>=1.4,<1.5
+pydantic~=2.14
+python-dotenv~=1.2
+anthropic~=2.4

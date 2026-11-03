@@ -8,8 +8,8 @@ A reconciliation pipeline for three sources that never quite agree (the payment 
 the internal ledger), with an AI copilot that will investigate the exceptions and propose fixes for a
 human to approve. The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
 
-Kafka and Snowflake (and later Airflow) are used at **project scale**: a single local broker and one
-Snowflake trial account with one XSMALL warehouse, not a production deployment.
+Kafka, Snowflake and Airflow are used at **project scale**: a single local broker, one Snowflake trial
+account with one XSMALL warehouse and a local Astro CLI Airflow, not a production deployment.
 
 ## Status
 
@@ -20,7 +20,8 @@ Snowflake trial account with one XSMALL warehouse, not a production deployment.
 | 3 | Copilot: typed read-only tools, validated tool-use loop, review CLI, audit log | done |
 | 4 | Evals and metrics: scored against ground truth, dev and held-out, unsafe proposals counted | done |
 | 5 | Snowflake: the same loader, dbt project and agent tools on a second engine, with a parity check | done |
-| 6 to 9 | Airflow, docs, PDFs, Kubernetes | not started |
+| 6 | Airflow (Astro CLI): `recon_daily` on Snowflake with the logical date as the as-of date; `recon_nightly_evals` paused | done |
+| 7 to 9 | Docs, PDFs, Kubernetes | not started |
 
 ## Quickstart (Mac on Apple Silicon)
 
@@ -329,6 +330,75 @@ the tool outputs are identical on both engines. `python -m recon.evals` refuses 
 - **Result:** correct root cause (`fee_mismatch`), the right action (`raise_fee_claim_with_processor`)
   at confidence 0.85, with all four records cited.
 - **Cost:** 4 tool calls, about 7s, $0.018.
+
+## Airflow (Slice 6)
+
+An Astro CLI project in [airflow/](airflow/) (Astro Runtime 3.3, Airflow 3), run locally with
+`astro dev`. It is **project-scale**: one local Airflow, the same local Kafka and the same Snowflake
+trial account. Details are in [airflow/README.md](airflow/README.md).
+
+```bash
+make up && make generate                          # Kafka, and the scenario on the dev topics
+make airflow-up                                   # astro dev start
+make airflow-backfill FROM=2026-10-15 TO=2026-10-20
+make airflow-report FROM=2026-10-15 TO=2026-10-20 # what each run recorded on Snowflake
+```
+
+**`recon_daily`** runs on Snowflake. The Airflow containers can't safely share the local DuckDB file.
+The run's **logical date is the as-of date**.
+
+| Task | What it does | Why a re-run is safe |
+|---|---|---|
+| `load_new_messages` | Kafka (internal listener `kafka:19092`) -> `RECON.RAW` as the loader, up to the end of each partition, then exits | fixed consumer group, `MERGE` on `event_id` |
+| `dbt_build` | `dbt build --target snowflake` with `as_of` = logical date, then snapshots that date's pending settlements and exceptions | replaces that date's snapshot rows |
+| `recheck_pending` | compares the date's snapshot with the previous date's: pending then and an exception now is a window that closed | replaces that date's rows in `RECON_DAILY_RUNS` and `RECON_WINDOW_HISTORY` |
+| `summary` | logs the backlog by reason code and the newly closed windows | read-only |
+
+The marts only ever hold the last as-of date dbt built. So nothing downstream of `dbt_build` reads
+them: it reads that date's snapshot instead. Any task can therefore be re-run for its date at any
+time, including after later dates have been built. The three tasks that write to Snowflake share a
+one-slot pool (`recon_snowflake_writes`). That matters because Airflow counts the concurrency of a
+scheduled run and a backfill separately, so they could otherwise interleave a build with another
+date's snapshot.
+
+The copilot is not in the DAG. It proposes only when a human runs it.
+
+**`recon_nightly_evals`** is paused by default, because every run calls the Claude API. It builds a
+private DuckDB copy inside the task and runs the Slice 4 harness, with a budget cap. It was not run in
+this slice.
+
+**Keys and code:**
+
+- The image contains neither keys nor repo code. The Snowflake keys, the recon package, the dbt project
+  and the FX reference rates are mounted at runtime, read-only, into the scheduler only. Tasks run there
+  under the LocalExecutor.
+- Ground truth is not mounted.
+- Tests on both sides check this: [tests/test_airflow_project.py](tests/test_airflow_project.py) on the
+  host, and `make airflow-test` for DAG integrity.
+
+**The backfill, 2026-10-15 to 2026-10-20** (synthetic seed 42, measured on Snowflake). The scenario's
+three planted late settlements have no bank line yet. Each one stays pending while its T+2 window is
+open and becomes a `missing_settlement` exception on the first as-of date after its deadline:
+
+| as-of | day | pending | windows closed | backlog | what changed |
+|---|---|---|---|---|---|
+| 2026-10-15 | Thu | 3 | 0 | 30 | none |
+| 2026-10-16 | Fri | 2 | 1 | 31 | `ch_57b6f1aaf2064a1c` (deadline 10-15, the edge case) -> `missing_settlement` |
+| 2026-10-17 | Sat | 0 | 2 | 33 | `ch_04105bd15415c636` and `ch_b2cc43726532b3ae` (deadline Fri 10-16) -> `missing_settlement` |
+| 2026-10-18 | Sun | 0 | 0 | 33 | none |
+| 2026-10-19 | Mon | 0 | 0 | 33 | none |
+| 2026-10-20 | Tue | 0 | 0 | 33 | none |
+
+The two charges with a Friday deadline flip on **Saturday**, not Monday. The window counts business
+days, but it is closed as soon as the as-of date is later than the deadline, and a Saturday as-of
+date already is.
+
+[tests/test_orchestration.py](tests/test_orchestration.py) asserts the same days on DuckDB, without
+Airflow or Snowflake.
+
+To check the re-run claims, the 10-16 run was cleared and re-run after the whole backfill: same
+result. The backfill's load tasks each received 0 messages, because the scheduled run before them had
+already loaded everything.
 
 ## Results
 
