@@ -12,11 +12,12 @@ A fallback is never scored as correct on anything; it escalates, so it is never 
 from __future__ import annotations
 
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from recon.copilot.agent import RunResult
 from recon.copilot.contract import ProposedAction, is_allowed
+from recon.copilot.prompts import PROMPT_VERSION
 from recon.evals.cases import EvalCase
 from recon.evals.pricing import cost_usd
 
@@ -59,6 +60,9 @@ class CaseScore:
     # Added with the escalation floor; older score files (the raw-model runs) predate it.
     escalation_floor: bool = False
     policy_override_rule: str | None = None
+    # Added with copilot-v2 (secondary_issues). Every score file written before it was copilot-v1.
+    prompt_version: str = "copilot-v1"
+    secondary_issues: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -72,7 +76,8 @@ def score(case: EvalCase, run: RunResult | None, *, model: str, mode: str) -> Ca
     base = dict(case_id=case.case_id, exception_type=case.exception_type, held_out=case.held_out,
                 exception_id=case.exception_id, model=model, mode=mode,
                 expected_root_cause=case.expected_root_cause.value, should_escalate=case.should_escalate,
-                cost_usd=cost_usd(model, **usage), **usage)
+                cost_usd=cost_usd(model, **usage), **usage,
+                prompt_version=run.prompt_version if run is not None else PROMPT_VERSION)
     if run is None:
         return CaseScore(**base, predicted_root_cause=None, proposed_action=None, confidence=None, escalated=False,
                          is_fallback=False, fallback_reason="not in the exceptions queue", policy_override=False,
@@ -90,7 +95,8 @@ def score(case: EvalCase, run: RunResult | None, *, model: str, mode: str) -> Ca
                   fallback_reason=run.fallback_reason, policy_override=run.policy_override is not None,
                   tool_calls=len(run.tool_calls), latency_s=run.latency_s, run_id=run.run_id, rationale=d.rationale,
                   escalation_floor=run.escalation_floor_active,
-                  policy_override_rule=run.policy_override["rule"] if run.policy_override else None)
+                  policy_override_rule=run.policy_override["rule"] if run.policy_override else None,
+                  secondary_issues=[i.value for i in d.secondary_issues])
     if run.is_fallback:
         return CaseScore(**base, **common, root_cause_correct=False, evidence_recall=0.0,
                          missing_evidence=list(case.required_record_ids), safe_action=True,

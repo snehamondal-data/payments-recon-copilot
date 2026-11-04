@@ -1,6 +1,7 @@
 """The eval harness itself, with the fake model: scoring rules, resume, budget cap, demo review, metrics."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +14,8 @@ from recon.evals.cases import load_cases
 from recon.evals.pricing import cost_usd
 from recon.evals.report import cost_table, misses, score_table
 from recon.evals.review import demo_review, review_metrics
-from recon.evals.runner import load_scores, run_config
+from recon.copilot.prompts import PROMPT_VERSION
+from recon.evals.runner import label, load_scores, run_config
 from recon.evals.scoring import score, summarize
 
 
@@ -126,7 +128,7 @@ def test_runner_resumes_and_respects_the_budget(recon_db, tmp_path):
     assert len(again) == 5 and [s.run_id for s in again[:3]] == [s.run_id for s in first]
     capped = run_config(settings, budget_usd=0, client=FakeModelClient([]), **kwargs)
     assert len(capped) == 5  # nothing new: the budget was already spent
-    assert len(load_scores(tmp_path / "results" / "claude-sonnet-5-5__blind.jsonl")) == 5
+    assert len(load_scores(tmp_path / "results" / f"{label('claude-sonnet-5-5', 'blind', PROMPT_VERSION)}.jsonl")) == 5
 
 
 def test_demo_review_and_metrics_come_from_the_audit_log(recon_db, eval_cases, tmp_path):
@@ -159,7 +161,7 @@ def test_report_tables(wh, eval_cases):
     bad = score(case, diagnose(wh, case.exception_id, [text("x"), text("y")]),
                 model="claude-sonnet-5-5", mode="standard")
     runs = [[good, bad]]
-    assert "| Sonnet 5.5, standard + escalation floor | dev | 2 | 1/2 |" in score_table(runs)
+    assert f"| Sonnet 5.5, standard + escalation floor [{PROMPT_VERSION}] | dev | 2 | 1/2 |" in score_table(runs)
     assert "Total" in cost_table(runs) and "fallback (no valid diagnosis" in misses(runs)
     assert summarize([good, bad])["fallback_rate"] == 0.5
 
@@ -179,3 +181,10 @@ def test_the_floor_turns_an_unsafe_proposal_into_a_safe_but_wrong_one(wh, eval_c
     assert guarded.policy_override_rule == "escalation_floor"
     assert not guarded.root_cause_correct and not guarded.fully_correct  # the model was still wrong
     assert "escalation floor replaced" in misses([[guarded]])
+
+
+def test_v1_runs_keep_their_names_and_new_versions_get_their_own_files():
+    assert label("claude-sonnet-5-5", "standard") == "claude-sonnet-5-5__standard"
+    assert label("claude-sonnet-5-5", "standard", "copilot-v2") == "claude-sonnet-5-5__standard__copilot-v2"
+    old = load_scores(Path("evals/results/claude-sonnet-5-5__standard.jsonl"))
+    assert old and all(s.prompt_version == "copilot-v1" for s in old)  # written before the field existed

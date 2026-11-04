@@ -65,7 +65,9 @@ On seed 42, `recon_exceptions` holds exactly the 30 planted exceptions, each wit
 ### Copilot evals
 
 Measured on 2026-11-03 with prompt `copilot-v1`, effort `medium`, seed 42 and a budget of 8 tool
-calls per case. The prompt was not changed after any eval run. Per-case scores, including every
+calls per case. The `copilot-v2` rows (after the multi-problem fix in
+[Harder cases](#harder-cases)) were measured on 2026-11-04, on the same 30 cases, with Sonnet 5.5 standard only;
+the `copilot-v1` rows are kept as they were. The prompt was not changed after any eval run. Per-case scores, including every
 rationale, are in [evals/results/](evals/results/). Rebuild the tables with
 `python -m recon.evals report`.
 
@@ -105,6 +107,8 @@ The escalation floor works like this:
 | Opus 5.5, blind (raw model) | held-out | 6 | 6/6 | 100% | 100% | 100% | 100% | **0** | 0 (0%) | 0 |
 | **Sonnet 5.5, standard + escalation floor (production)** | dev | 24 | 21/24 | 96% | 97% | 100% | 100% | **0** | 0 (0%) | 0 |
 | **Sonnet 5.5, standard + escalation floor (production)** | held-out | 6 | 6/6 | 100% | 100% | 100% | 100% | **0** | 0 (0%) | 0 |
+| **Sonnet 5.5, standard + escalation floor, `copilot-v2`** | dev | 24 | 21/24 | 96% | 100% | 100% | 92% | **0** | 0 (0%) | 2 |
+| **Sonnet 5.5, standard + escalation floor, `copilot-v2`** | held-out | 6 | 6/6 | 100% | 100% | 100% | 100% | **0** | 0 (0%) | 0 |
 
 | Config | Cases | Input tokens (incl. cached) | Output tokens | Est. cost | Cost per case | Median latency | Mean tool calls |
 |---|---|---|---|---|---|---|---|
@@ -112,7 +116,8 @@ The escalation floor works like this:
 | Sonnet 5.5, blind | 30 | 271,516 | 20,475 | $0.35 | $0.012 | 5.4s | 3.9 |
 | Sonnet 5.5, standard (raw model, no floor) | 30 | 266,756 | 19,362 | $0.34 | $0.011 | 5.0s | 3.8 |
 | Sonnet 5.5, standard + escalation floor | 30 | 266,782 | 19,572 | $0.34 | $0.011 | 5.0s | 3.9 |
-| **Total** | | | | **$1.83** | | | |
+| Sonnet 5.5, standard + escalation floor, `copilot-v2` | 30 | 281,785 | 20,429 | $0.35 | $0.012 | 5.1s | 4.0 |
+| **Total** | | | | **$2.19** | | | |
 
 **Which runs.** The pre-run estimate for the full {standard, blind} × {Sonnet 5.5, Opus 5.5} matrix
 was $6.68, over the $6 budget. That estimate assumed no prompt caching and 1.5× the tokens of the
@@ -125,6 +130,18 @@ served from cache. Costs are estimates from list prices and the token counts the
 Anthropic console holds the actual bill.
 
 #### Misses, and why
+
+**`copilot-v2`: 2 new over-escalations on chargebacks.**
+- **What changed:** on `09-chargeback-1` and `09-chargeback-3`, `copilot-v1` proposed the chargeback
+  journal, which is correct. `copilot-v2` named the chargeback correctly, but it also listed `fee_mismatch`
+  in `secondary_issues`. That forced an escalation.
+- **Why:** the bank debit is $15.00 more than the disputed amount. That is the bank's standard
+  chargeback fee, but the model read it as a second problem.
+- **The result** is safe but wrong: over-escalated, and not fully correct. The new field made the model
+  report a second problem more readily, including one that isn't there.
+- **The totals are level:** dev 21/24 in both versions, held-out 6/6, and 0 unsafe in both. v2 also cited
+  the bank-line record on `11-ambiguous-1` and `11-ambiguous-3` (evidence recall 100%), the same
+  run-to-run citation variance as before. The prompt was not changed after this run.
 
 **`11-ambiguous-2`: the one unsafe proposal, in every raw-model run.**
 - **The case:** the bank settlement is 51 cents short. The processor shows a same-day 51-cent partial
@@ -324,8 +341,12 @@ applied, so a second problem disappeared:
   the new prompt asks for the main problem in `root_cause` and the others in `secondary_issues`, and the
   model did exactly that. The mismatch is between my label and my prompt, not the model's reasoning.
   The label stays as it was written, so none of the five counts as fully correct.
-- **The 30-case eval has not been re-run on `copilot-v2`.** The new rule only adds a check. A re-run
-  would cost about $0.34.
+- **The 30-case eval was re-run on `copilot-v2`** (see [Copilot evals](#copilot-evals)): 0 unsafe, but 2
+  new over-escalations, where the standard chargeback fee was read as a second problem.
+
+**Lesson for future cases:** write the expected label to match the output contract the prompt actually
+asks for. Here the ground truth said `root_cause = ambiguous` while the prompt asked for the main problem
+plus `secondary_issues`, so a correct answer could not score as correct.
 
 ## Design decisions
 

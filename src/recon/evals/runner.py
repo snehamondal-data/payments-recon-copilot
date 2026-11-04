@@ -21,8 +21,9 @@ from recon.evals.scoring import CaseScore, score
 MODES = ("standard", "blind")
 
 
-def label(model: str, mode: str) -> str:
-    return f"{model}__{mode}"
+def label(model: str, mode: str, prompt_version: str = "copilot-v1") -> str:
+    """copilot-v1 runs keep their original file names; later prompt versions get their own files."""
+    return f"{model}__{mode}" if prompt_version == "copilot-v1" else f"{model}__{mode}__{prompt_version}"
 
 
 def load_scores(path: Path) -> list[CaseScore]:
@@ -42,12 +43,15 @@ def run_config(settings: Settings, *, model: str, mode: str, results_dir: Path, 
         raise ValueError(f"mode must be one of {MODES}")
     results_dir.mkdir(parents=True, exist_ok=True)
     audit_dir.mkdir(parents=True, exist_ok=True)
-    out_path = results_dir / f"{label(model, mode)}.jsonl"
+    from recon.copilot.prompts import PROMPT_VERSION
+
+    run_label = label(model, mode, PROMPT_VERSION)
+    out_path = results_dir / f"{run_label}.jsonl"
     done = {s.case_id: s for s in load_scores(out_path)}
 
     warehouse = ReadOnlyWarehouse(settings.duckdb_path, forbidden_paths=settings.agent_forbidden_paths(),
                                   hide_reason_code=mode == "blind")
-    store = CopilotStore(audit_dir / f"{label(model, mode)}.duckdb")
+    store = CopilotStore(audit_dir / f"{run_label}.duckdb")
     try:
         cases, _ = load_cases(settings.ground_truth_path, warehouse)
         copilot = Copilot(client or AnthropicModelClient(model, effort=settings.copilot_effort), warehouse,
