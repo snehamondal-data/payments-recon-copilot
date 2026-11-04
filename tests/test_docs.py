@@ -24,8 +24,8 @@ def test_no_em_dashes(path):
 
 def test_readme_sections_are_in_the_agreed_order():
     headings = re.findall(r"^## (.+)$", (ROOT / "README.md").read_text(), flags=re.M)
-    assert headings[:7] == ["In one minute", "Architecture", "Results", "Design decisions", "How to run it",
-                            "Semantic layer", "How it works"]
+    assert headings[:6] == ["In one minute", "Architecture", "Results", "Design decisions", "How to run it",
+                            "How it works"]
 
 
 def test_readme_opens_with_the_one_minute_summary():
@@ -39,7 +39,8 @@ def test_readme_opens_with_the_one_minute_summary():
 
 def test_readme_results_include_parity_and_the_backfill():
     results = (ROOT / "README.md").read_text().split("## Results", 1)[1].split("## Design decisions")[0]
-    for heading in ("### Copilot evals", "### DuckDB vs Snowflake parity", "### Airflow backfill"):
+    for heading in ("### Copilot evals", "### Semantic layer eval", "### DuckDB vs Snowflake parity",
+                    "### Airflow backfill", "### Harder cases"):
         assert heading in results
 
 

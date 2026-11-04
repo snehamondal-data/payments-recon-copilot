@@ -181,6 +181,47 @@ operations team.**
 | Median time to resolve | 100s. This is mostly the wait between the eval run and the review session, not review effort |
 | Changes applied without human approval | **0** (27 resolution records, each with a reviewer decision in the audit log) |
 
+### Semantic layer eval
+
+The `ask` command and its five metrics are explained in [How it works](#semantic-layer-slice-8).
+
+Five questions, scored on exact numbers: to the cent, to 4 decimals for a rate, and exact for
+a count. The expected answers come from plain SQL on the existing marts, never through the semantic
+layer. There were two live runs on Sonnet 5.5, $0.039 each, one per prompt version. Results are in
+[evals/results/semantic/](evals/results/semantic/), one file per prompt version.
+
+| Question | `ask-v1`, as first scored | `ask-v1`, after the scorer fix | `ask-v2` |
+|---|---|---|---|
+| How much money is at risk by reason code? | wrong | correct | correct |
+| How many exceptions are in the queue, and how many still have money at stake? | correct | correct | correct |
+| What is our match rate for each currency? | correct | correct | correct |
+| How many charges are still waiting to settle inside their window, and in which currencies? | wrong | correct | correct |
+| How much money is at risk from fee mismatches and chargebacks combined? | wrong | wrong | correct |
+| **Total** | **2/5** | **4/5** | **5/5** |
+
+Why each score changed:
+
+- **2/5, `ask-v1` as first scored:** the scorer had a bug. It counted true extra figures as wrong, such
+  as an overall total stated alongside the breakdown that was asked for.
+- **4/5, after the scorer fix:** every stated figure is now checked against plain SQL for its metric,
+  dimension values and filters. The *same saved answers* were re-scored, with no new model call. q5
+  stays wrong because its figure didn't record the filter it came from, so as saved it claims the total
+  amount at risk is $729.36 (the total is $4,208.88).
+- **5/5, `ask-v2`, one fresh run:** figures now carry their filters, and the grounding check requires
+  them. q5's $729.36 is recorded with its `reason_code in fee_mismatch, chargeback` filter.
+
+The metric was named `open_backlog` when `ask-v1` ran. The saved `ask-v1` answers keep the name the
+model used, and the scorer maps it to `exceptions_with_money_at_stake`.
+
+**What this doesn't show:**
+
+- 5 questions, one run per prompt version, is a smoke test, not a measurement. The `ask-v2` change
+  was made after seeing the `ask-v1` answers, on these same questions, so 5/5 is not a held-out result.
+- Refusing an unanswerable question is covered by unit tests with a scripted model. It was not
+  measured live.
+- `ask` runs on DuckDB only. The models build on Snowflake, but the semantic manifest is compiled
+  against the local warehouse.
+
 ### DuckDB vs Snowflake parity
 
 `make parity` publishes the scenario to fresh Kafka topics, loads them through the real
@@ -307,104 +348,6 @@ make test                 # unit tests: no Docker, no API calls, no Snowflake
 - **Airflow:** `make airflow-up`, then `make airflow-backfill` and `make airflow-report` ([airflow/README.md](airflow/README.md)).
 - **Settings:** environment variables, see [.env.example](.env.example).
 - **Operating it:** [docs/DISCOVERY.md](docs/DISCOVERY.md), [docs/ROLLOUT.md](docs/ROLLOUT.md), [docs/RUNBOOK.md](docs/RUNBOOK.md).
-
-## Semantic layer
-
-For questions about the whole picture rather than one exception, there is a small semantic layer
-and an `ask` command:
-
-```bash
-.venv/bin/python -m recon.copilot ask "how much money is at risk by reason code?"
-```
-
-**dbt's own semantic layer, not a custom one.** MetricFlow (`dbt-metricflow` 0.15) installed cleanly
-alongside the pinned dbt-duckdb 1.11 and DuckDB 1.4.5. It added only `dbt-metricflow` and five small
-CLI helpers, and no pinned version moved. So the metrics are defined in dbt, in
-[dbt/models/semantic/_semantic.yml](dbt/models/semantic/_semantic.yml). They sit on one new model,
-`recon_items`: one row per charge, plus each bank-line exception. No existing model changed. It runs on
-DuckDB; the same models also build on Snowflake.
-
-| Metric | Unit | Plain-English definition |
-|---|---|---|
-| `exception_count` | count | items in the exceptions queue: things that don't tie out and need a person |
-| `amount_at_risk` | USD | total money at stake across the queue; timing-only differences count as zero |
-| `exceptions_with_money_at_stake` | count | exceptions that still have money at stake, so money has to be moved or claimed to close them |
-| `pending_count` | count | charges not settled yet but still inside their T+2 window, so not exceptions yet |
-| `match_rate` | fraction | the share of charges that tie out across processor, bank and ledger |
-
-Dimensions: `reason_code`, `window_status`, `currency` (the charge's original currency; amounts are
-always USD) and `as_of_date`.
-
-**Not a reviewer backlog.** `exceptions_with_money_at_stake` counts exceptions that still have money
-at stake, whether or not a reviewer has resolved them. Review state lives in the copilot's audit store,
-which neither agent is allowed to read. A true reviewer backlog (exceptions not yet resolved) needs
-resolutions to flow into the warehouse. That is **future work**.
-
-**How a question is answered:**
-
-1. The agent has exactly one data tool, `query_metric(metric, dimensions, filters)`. Its arguments are
-   validated by pydantic, so filter values must come from a closed set (the 10 reason codes, 3
-   currencies, real dates).
-2. MetricFlow compiles the typed request into SQL from dbt's semantic manifest.
-3. That SQL runs on the same locked-down read-only DuckDB connection the copilot's tools use. There is
-   no raw SQL anywhere.
-4. **Every number in the answer must be one that `query_metric` returned in that session**, with the
-   same metric, dimension values and filters. So the model can't make a figure up or do its own
-   arithmetic: a combined number has to be queried with a filter.
-5. A question the metrics can't answer gets `answerable: false`, and the code then lists the metrics
-   and dimensions it can answer.
-
-**A real example** (Sonnet 5.5, 1 metric query, 5.7s):
-
-```
-$ python -m recon.copilot ask "how much money is at risk by reason code?"
-Amount at risk by reason code (USD): missing_settlement 1154.40; duplicate_webhook 984.79;
-chargeback 728.40; orphan_bank_deposit 536.80; ambiguous 358.39; missing_ledger_entry 299.33;
-partial_refund_not_in_ledger 145.78; fee_mismatch 0.96; currency_rounding 0.03; date_mismatch 0.00
-(timing-only). Matched and pending items have no reason code and show 0.00.
-
-Figures (each one returned by query_metric):
-  amount_at_risk [reason_code=missing_settlement]: $1154.40
-  amount_at_risk [reason_code=duplicate_webhook]: $984.79
-  ...
-```
-
-**Eval.** Five questions, scored on exact numbers: to the cent, to 4 decimals for a rate, and exact for
-a count. The expected answers come from plain SQL on the existing marts, never through the semantic
-layer. There were two live runs on Sonnet 5.5, $0.039 each, one per prompt version. Results are in
-[evals/results/semantic/](evals/results/semantic/), one file per prompt version.
-
-| Question | `ask-v1`, as first scored | `ask-v1`, after the scorer fix | `ask-v2` |
-|---|---|---|---|
-| How much money is at risk by reason code? | wrong | correct | correct |
-| How many exceptions are in the queue, and how many still have money at stake? | correct | correct | correct |
-| What is our match rate for each currency? | correct | correct | correct |
-| How many charges are still waiting to settle inside their window, and in which currencies? | wrong | correct | correct |
-| How much money is at risk from fee mismatches and chargebacks combined? | wrong | wrong | correct |
-| **Total** | **2/5** | **4/5** | **5/5** |
-
-Why each score changed:
-
-- **2/5, `ask-v1` as first scored:** the scorer had a bug. It counted true extra figures as wrong, such
-  as an overall total stated alongside the breakdown that was asked for.
-- **4/5, after the scorer fix:** every stated figure is now checked against plain SQL for its metric,
-  dimension values and filters. The *same saved answers* were re-scored, with no new model call. q5
-  stays wrong because its figure didn't record the filter it came from, so as saved it claims the total
-  amount at risk is $729.36 (the total is $4,208.88).
-- **5/5, `ask-v2`, one fresh run:** figures now carry their filters, and the grounding check requires
-  them. q5's $729.36 is recorded with its `reason_code in fee_mismatch, chargeback` filter.
-
-The metric was named `open_backlog` when `ask-v1` ran. The saved `ask-v1` answers keep the name the
-model used, and the scorer maps it to `exceptions_with_money_at_stake`.
-
-**What this doesn't show:**
-
-- 5 questions, one run per prompt version, is a smoke test, not a measurement. The `ask-v2` change
-  was made after seeing the `ask-v1` answers, on these same questions, so 5/5 is not a held-out result.
-- Refusing an unanswerable question is covered by unit tests with a scripted model. It was not
-  measured live.
-- `ask` runs on DuckDB only. The models build on Snowflake, but the semantic manifest is compiled
-  against the local warehouse.
 
 ## How it works
 
@@ -739,6 +682,69 @@ this slice.
   host, and `make airflow-test` for DAG integrity.
 
 **The backfill** over 2026-10-15 to 2026-10-20 is under [Results](#airflow-backfill-pending-settlements-becoming-exceptions).
+
+### Semantic layer (Slice 8)
+
+For questions about the whole picture rather than one exception, there is a small semantic layer
+and an `ask` command:
+
+```bash
+.venv/bin/python -m recon.copilot ask "how much money is at risk by reason code?"
+```
+
+**dbt's own semantic layer, not a custom one.** MetricFlow (`dbt-metricflow` 0.15) installed cleanly
+alongside the pinned dbt-duckdb 1.11 and DuckDB 1.4.5. It added only `dbt-metricflow` and five small
+CLI helpers, and no pinned version moved. So the metrics are defined in dbt, in
+[dbt/models/semantic/_semantic.yml](dbt/models/semantic/_semantic.yml). They sit on one new model,
+`recon_items`: one row per charge, plus each bank-line exception. No existing model changed. It runs on
+DuckDB; the same models also build on Snowflake.
+
+| Metric | Unit | Plain-English definition |
+|---|---|---|
+| `exception_count` | count | items in the exceptions queue: things that don't tie out and need a person |
+| `amount_at_risk` | USD | total money at stake across the queue; timing-only differences count as zero |
+| `exceptions_with_money_at_stake` | count | exceptions that still have money at stake, so money has to be moved or claimed to close them |
+| `pending_count` | count | charges not settled yet but still inside their T+2 window, so not exceptions yet |
+| `match_rate` | fraction | the share of charges that tie out across processor, bank and ledger |
+
+Dimensions: `reason_code`, `window_status`, `currency` (the charge's original currency; amounts are
+always USD) and `as_of_date`.
+
+**Not a reviewer backlog.** `exceptions_with_money_at_stake` counts exceptions that still have money
+at stake, whether or not a reviewer has resolved them. Review state lives in the copilot's audit store,
+which neither agent is allowed to read. A true reviewer backlog (exceptions not yet resolved) needs
+resolutions to flow into the warehouse. That is **future work**.
+
+**How a question is answered:**
+
+1. The agent has exactly one data tool, `query_metric(metric, dimensions, filters)`. Its arguments are
+   validated by pydantic, so filter values must come from a closed set (the 10 reason codes, 3
+   currencies, real dates).
+2. MetricFlow compiles the typed request into SQL from dbt's semantic manifest.
+3. That SQL runs on the same locked-down read-only DuckDB connection the copilot's tools use. There is
+   no raw SQL anywhere.
+4. **Every number in the answer must be one that `query_metric` returned in that session**, with the
+   same metric, dimension values and filters. So the model can't make a figure up or do its own
+   arithmetic: a combined number has to be queried with a filter.
+5. A question the metrics can't answer gets `answerable: false`, and the code then lists the metrics
+   and dimensions it can answer.
+
+**A real example** (Sonnet 5.5, 1 metric query, 5.7s):
+
+```
+$ python -m recon.copilot ask "how much money is at risk by reason code?"
+Amount at risk by reason code (USD): missing_settlement 1154.40; duplicate_webhook 984.79;
+chargeback 728.40; orphan_bank_deposit 536.80; ambiguous 358.39; missing_ledger_entry 299.33;
+partial_refund_not_in_ledger 145.78; fee_mismatch 0.96; currency_rounding 0.03; date_mismatch 0.00
+(timing-only). Matched and pending items have no reason code and show 0.00.
+
+Figures (each one returned by query_metric):
+  amount_at_risk [reason_code=missing_settlement]: $1154.40
+  amount_at_risk [reason_code=duplicate_webhook]: $984.79
+  ...
+```
+
+The eval scores are under [Results](#semantic-layer-eval).
 
 ### Built in slices
 
