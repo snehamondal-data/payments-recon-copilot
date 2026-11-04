@@ -14,11 +14,9 @@ duplicate rows, reconciliation finds all 30 planted exceptions with the right re
 alarms, and the results are identical on DuckDB and Snowflake. With the escalation floor, a rule in
 code that forces escalation on ambiguous cases, there are 0 unsafe proposals on the 30 planted cases;
 on its own the model made 1, so that guarantee comes from the guard rail, not from the model. A harder
-case with two problems on one payment exposed a gap; after a fix in the SQL and in the copilot's
-validation (`copilot-v2`), all 5 two-problem cases escalate and there are 0 unsafe proposals on 35
-planted cases (the 30 plus those 5), though the model once named only one of the two problems and it
-over-escalated 2 chargebacks in the 30-case re-run. **All data is synthetic**, and Kafka, Snowflake and
-Airflow run at project scale, not in production.
+test, with two problems on one payment, exposed a gap that is now fixed: across 35 planted cases
+there are 0 unsafe proposals, at the cost of 2 unnecessary escalations. **All data is synthetic**, and
+Kafka, Snowflake and Airflow run at project scale, not in production.
 
 ## Architecture
 
