@@ -6,14 +6,17 @@ Tallyline is a fictional payments startup whose operations team reconciles money
 payment processor says happened, what the bank actually settled and what the internal ledger recorded
 rarely agree, and every mismatch has to be chased by a person. This project streams all three sources
 through Kafka, reconciles them with dbt while respecting the bank's two-business-day settlement window,
-and puts every mismatch in a queue with a reason code. An AI copilot built on Claude investigates each
-exception with a small set of read-only lookup tools and proposes a fix, and a human approves or
-rejects every proposal, so nothing changes without that approval. Replaying the full message history
-inserts 0 duplicate rows, reconciliation finds all 30 planted exceptions with the right reason code and
-no false alarms, and the results are identical on DuckDB and Snowflake. On its own the model made 1
-unsafe proposal out of 30 in every configuration tested; a rule in code that forces escalation on
-ambiguous cases brings that to 0, so that guarantee comes from the guard rail, not from the model.
-**All data is synthetic**, and Kafka, Snowflake and Airflow run at project scale, not in production.
+and queues every mismatch for an AI copilot built on Claude, which investigates with read-only lookup
+tools and proposes a fix that a human must approve before anything changes. The ops team can also ask
+plain-English questions about the whole picture, answered only through 5 governed dbt (MetricFlow)
+metrics, with every number grounded in a query result. Replaying the full message history inserts 0
+duplicate rows, reconciliation finds all 30 planted exceptions with the right reason code and no false
+alarms, and the results are identical on DuckDB and Snowflake. There are 0 unsafe proposals on the 30
+planted cases with the escalation floor, a rule in code that forces escalation on ambiguous cases;
+on its own the model made 1, so that guarantee comes from the guard rail, not from the model. A harder
+case with two problems on one payment exposed a gap: only human approval would have caught it, and the
+fix is planned. **All data is synthetic**, and Kafka, Snowflake and Airflow run at project scale, not in
+production.
 
 ## Architecture
 
@@ -26,6 +29,8 @@ flowchart LR
     wh --> dbt["dbt<br/>matching, T+2 windows"]
     dbt --> marts[("Exceptions queue<br/>matches, pending")]
     marts --> tools["6 typed<br/>read-only tools"]
+    marts --> semantic["Semantic layer<br/>5 dbt metrics (MetricFlow)"]
+    semantic --> ask["ask command<br/>query_metric only"]
     tools --> agent["Copilot<br/>Claude, structured output"]
     agent --> review["Review CLI<br/>human approves"]
     review --> audit[("Audit log<br/>and resolutions")]
@@ -45,7 +50,8 @@ flowchart LR
 - **Copilot:** investigates one exception and returns a validated diagnosis with cited evidence, or falls back to escalation.
 - **Review CLI:** a human approves, rejects or resolves; approving writes a resolution record and never touches source data.
 - **Audit log:** every tool call, model output, policy override and review decision, append-only.
-- **Semantic layer:** five metrics defined in dbt (MetricFlow), so `ask` can answer questions about the whole picture through one typed tool.
+- **Semantic layer:** five governed metrics defined in dbt (MetricFlow) on top of the marts, compiled to SQL by MetricFlow and run read-only.
+- **`ask` command:** answers plain-English questions about the whole picture by calling only `query_metric`; every number it states must match a query result.
 - **Airflow:** runs the daily load, dbt build and pending-settlement re-check on Snowflake; the copilot is not scheduled.
 - **Ground truth and evals:** the planted answers live in a separate file that only the evals read, never the loader, dbt or the agent.
 
@@ -272,10 +278,12 @@ against.
   and nothing else: no writes, and no access at all to the copilot schema. The audit log and
   resolutions are written by the loader role. Both users are key-pair service users with no password,
   and tests probe every kind of write.
-- **A semantic layer instead of text-to-SQL for questions.** `ask` can only call `query_metric` with
-  validated arguments, and every number it states must match a value that tool returned. That is the
-  same rule as the copilot's tools: the model chooses what to look at, and code decides what it is
-  allowed to say.
+- **Questions go through governed metrics, not generated SQL.** `ask` can only call
+  `query_metric` with a defined metric, dimensions and filter values from a closed set. Every number it
+  states must match a value that tool returned. The metric definitions live in dbt next to the models,
+  so "amount at risk" means one thing everywhere and is tested against hand-written SQL. Generated SQL
+  could quietly define it differently in each answer, or invent a number. It is the same rule as the
+  copilot's tools: the model chooses what to look at, and code decides what it may say.
 - **Secondary roles off.** New Snowflake users default to `DEFAULT_SECONDARY_ROLES = ('ALL')`, so a
   session quietly holds every role granted to the user. The role tests caught it; every connection now
   runs `USE SECONDARY ROLES NONE` and refuses to continue unless it holds exactly one role.
