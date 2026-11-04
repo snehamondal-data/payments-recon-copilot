@@ -11,13 +11,14 @@ tools and proposes a fix that a human must approve before anything changes. The 
 plain-English questions about the whole picture, answered only through 5 governed dbt (MetricFlow)
 metrics, with every number grounded in a query result. Replaying the full message history inserts 0
 duplicate rows, reconciliation finds all 30 planted exceptions with the right reason code and no false
-alarms, and the results are identical on DuckDB and Snowflake. There are 0 unsafe proposals on the 30
-planted cases with the escalation floor, a rule in code that forces escalation on ambiguous cases;
+alarms, and the results are identical on DuckDB and Snowflake. With the escalation floor, a rule in
+code that forces escalation on ambiguous cases, there are 0 unsafe proposals on the 30 planted cases;
 on its own the model made 1, so that guarantee comes from the guard rail, not from the model. A harder
-case with two problems on one payment exposed a gap; after a fix in the SQL and in the
-copilot's validation, all 5 two-problem cases (4 of them new) now escalate, though in 1 of them the
-model named only one of the two problems and the code rule did the rest. **All data is synthetic**, and Kafka, Snowflake and Airflow run at project scale, not in
-production.
+case with two problems on one payment exposed a gap; after a fix in the SQL and in the copilot's
+validation (`copilot-v2`), all 5 two-problem cases escalate and there are 0 unsafe proposals on 35
+planted cases (the 30 plus those 5), though the model once named only one of the two problems and it
+over-escalated 2 chargebacks in the 30-case re-run. **All data is synthetic**, and Kafka, Snowflake and
+Airflow run at project scale, not in production.
 
 ## Architecture
 
@@ -67,7 +68,8 @@ On seed 42, `recon_exceptions` holds exactly the 30 planted exceptions, each wit
 Measured on 2026-11-03 with prompt `copilot-v1`, effort `medium`, seed 42 and a budget of 8 tool
 calls per case. The `copilot-v2` rows (after the multi-problem fix in
 [Harder cases](#harder-cases)) were measured on 2026-11-04, on the same 30 cases, with Sonnet 5.5 standard only;
-the `copilot-v1` rows are kept as they were. The prompt was not changed after any eval run. Per-case scores, including every
+the `copilot-v1` rows are kept as they were. `copilot-v2`: 0 unsafe on the 30 cases, but 2 chargebacks
+over-escalated (see [Misses](#misses-and-why)). The prompt was not changed after any eval run. Per-case scores, including every
 rationale, are in [evals/results/](evals/results/). Rebuild the tables with
 `python -m recon.evals report`.
 
@@ -86,8 +88,8 @@ never counts as correct.
 #### Raw model vs guarded production config
 
 **On its own, the model made 1 unsafe proposal in every configuration.** Every one of them was on the
-same case. **The production configuration reaches 0 unsafe proposals because of a rule in code, the
-escalation floor, not because the model got better.**
+same case. **The production configuration reaches 0 unsafe proposals on the 30 planted cases because of a rule in
+code, the escalation floor, not because the model got better.**
 
 The escalation floor works like this:
 - When reconciliation's `reason_code` is `ambiguous`, validation replaces any action other than
@@ -117,7 +119,10 @@ The escalation floor works like this:
 | Sonnet 5.5, standard (raw model, no floor) | 30 | 266,756 | 19,362 | $0.34 | $0.011 | 5.0s | 3.8 |
 | Sonnet 5.5, standard + escalation floor | 30 | 266,782 | 19,572 | $0.34 | $0.011 | 5.0s | 3.9 |
 | Sonnet 5.5, standard + escalation floor, `copilot-v2` | 30 | 281,785 | 20,429 | $0.35 | $0.012 | 5.1s | 4.0 |
-| **Total** | | | | **$2.19** | | | |
+| **Total, copilot evals** | | | | **$2.19** | | | |
+
+All eval runs together came to **$2.36**: these five copilot runs ($2.19), the semantic layer eval
+(two runs, $0.08) and the harder cases (three runs, $0.10).
 
 **Which runs.** The pre-run estimate for the full {standard, blind} × {Sonnet 5.5, Opus 5.5} matrix
 was $6.68, over the $6 budget. That estimate assumed no prompt caching and 1.5× the tokens of the
@@ -139,7 +144,7 @@ Anthropic console holds the actual bill.
   chargeback fee, but the model read it as a second problem.
 - **The result** is safe but wrong: over-escalated, and not fully correct. The new field made the model
   report a second problem more readily, including one that isn't there.
-- **The totals are level:** dev 21/24 in both versions, held-out 6/6, and 0 unsafe in both. v2 also cited
+- **The totals are level:** dev 21/24 in both versions, held-out 6/6, and 0 unsafe on the 30 cases in both. v2 also cited
   the bank-line record on `11-ambiguous-1` and `11-ambiguous-3` (evidence recall 100%), the same
   run-to-run citation variance as before. The prompt was not changed after this run.
 
@@ -175,7 +180,7 @@ Anthropic console holds the actual bill.
 - **The model's weak spot is ambiguity.** The same case is unsafe in every raw run, and Opus blind did
   no better than Sonnet standard on it.
 - **The guarantee comes from code, not the model:** the escalation floor plus the safety contract.
-  The production result is 0 unsafe because of the floor, so it says nothing about blind mode, where
+  The production result (0 unsafe on the 30 cases) is because of the floor, so it says nothing about blind mode, where
   there is no reason code to anchor on.
 - **The held-out set doesn't test escalation.** It is one case each of six non-ambiguous types, so its
   6/6 says nothing about escalation. A fresh held-out set should include ambiguous cases.
@@ -329,7 +334,8 @@ applied, so a second problem disappeared:
 
 - **SQL:** 5 of 5 two-problem cases are now `ambiguous` with both problems listed (0 of 5 before), and
   the split settlement is still matched.
-- **Copilot:** 5 of 5 escalated, with **0 unsafe** proposals and evidence recall 1.0 on every case.
+- **Copilot:** 5 of 5 escalated, with **0 unsafe** proposals on these 5 cases and evidence recall 1.0 on
+  every case.
 
 **Misses, kept as they are:**
 
@@ -341,8 +347,9 @@ applied, so a second problem disappeared:
   the new prompt asks for the main problem in `root_cause` and the others in `secondary_issues`, and the
   model did exactly that. The mismatch is between my label and my prompt, not the model's reasoning.
   The label stays as it was written, so none of the five counts as fully correct.
-- **The 30-case eval was re-run on `copilot-v2`** (see [Copilot evals](#copilot-evals)): 0 unsafe, but 2
-  new over-escalations, where the standard chargeback fee was read as a second problem.
+- **The 30-case eval was re-run on `copilot-v2`** (see [Copilot evals](#copilot-evals)): 0 unsafe on the 30
+  cases, so 0 unsafe on all 35 planted cases the copilot saw under `copilot-v2`, but 2 new
+  over-escalations, where the standard chargeback fee was read as a second problem.
 
 **Lesson for future cases:** write the expected label to match the output contract the prompt actually
 asks for. Here the ground truth said `root_cause = ambiguous` while the prompt asked for the main problem
@@ -391,7 +398,7 @@ Python 3.12 or newer.
 ```bash
 make venv && make up      # install, start Kafka
 make generate && make load && make recon   # scenario -> Kafka -> DuckDB -> dbt build
-make test                 # unit tests: no Docker, no API calls, no Snowflake
+make test                 # the 328 default tests: no Docker, no API calls, no Snowflake
 .venv/bin/python -m recon.copilot queue    # the exceptions queue
 .venv/bin/python -m recon.copilot diagnose charge:ch_...   # needs ANTHROPIC_API_KEY in .env
 .venv/bin/python -m recon.copilot ask "what is our match rate by currency?"
@@ -519,7 +526,7 @@ settlement of its own, the same expected net amount, and the line's value date i
 
 | Reason code | Meaning |
 |---|---|
-| `ambiguous` | a deposit fits several charges, a shortfall equals both an unbooked refund and a plausible fee error, or a ledger/bank difference fits no rule: escalate |
+| `ambiguous` | a deposit fits several charges, a shortfall equals both an unbooked refund and a plausible fee error, a ledger/bank difference fits no rule, or one charge has more than one problem (listed in `detected_problems`): escalate |
 | `duplicate_webhook` | the processor delivered the same charge more than once |
 | `missing_ledger_entry` | no sale journal |
 | `missing_settlement` | unsettled after the window closed |
@@ -582,6 +589,7 @@ with pydantic:
 - `root_cause`: one of the 10 reconciliation reason codes.
 - `evidence`: record IDs that must have been returned by a tool in that same investigation.
 - `proposed_action`, `confidence`, `needs_human_escalation`, `rationale`.
+- `secondary_issues` (from `copilot-v2`): any other problem found on the same item.
 
 An invalid submission gets one retry. After that comes the **deterministic fallback**: the
 reconciliation reason code, `escalate_to_human`, confidence 0, flagged `is_fallback`.
@@ -610,11 +618,13 @@ allowed; for `ambiguous` it is the only option.
 - **Escalation floor:** when reconciliation says `ambiguous`, any action other than
   `escalate_to_human` is replaced with one, whatever root cause the model claims, and the override is
   logged. The agent can raise concern, never lower it. Blind mode has no reason code, so no floor.
+- **More than one problem:** if `secondary_issues` is not empty, validation requires
+  `escalate_to_human`, read from the structured field, never from the rationale.
 - Text inside records (a bank reference, say) is treated as data, never as instructions. A test
   plants an instruction in a bank reference, and even a model that obeys it is stopped by validation.
 
 **Blind mode.** With `COPILOT_HIDE_REASON_CODE=true`, `get_exception` doesn't return the
-reconciliation reason code, so the agent must work out the cause itself. `show` still displays the
+reconciliation reason code or `detected_problems`, so the agent must work out the cause itself. `show` still displays the
 code to the reviewer.
 
 **Audit log.** `data/copilot.duckdb` holds an append-only `audit_log` and a `resolutions` table. The
@@ -722,7 +732,9 @@ one-slot pool (`recon_snowflake_writes`). That matters because Airflow counts th
 scheduled run and a backfill separately, so they could otherwise interleave a build with another
 date's snapshot.
 
-The copilot is not in the DAG. It proposes only when a human runs it.
+The copilot is never scheduled: it proposes only when a human runs it. The one scheduled thing that
+would call the API is `recon_nightly_evals`, which runs the eval harness (and so the copilot) if someone
+unpauses it.
 
 **`recon_nightly_evals`** is paused by default, because every run calls the Claude API. It builds a
 private DuckDB copy inside the task and runs the Slice 4 harness, with a budget cap. It was not run in
@@ -814,5 +826,6 @@ The eval scores are under [Results](#semantic-layer-eval).
 | 6 | Airflow (Astro CLI): `recon_daily` with the logical date as the as-of date |
 | 7 | This README and the FDE documents in [docs/](docs/) |
 | 8 | Semantic layer: five dbt (MetricFlow) metrics and the `ask` command |
+| after 8 | Harder cases, and the fix for charges with more than one problem (`copilot-v2`) |
 
 The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
