@@ -188,6 +188,7 @@ class ReadOnlyWarehouse:
         row = {"record_id": row["exception_id"], **row}
         if self.hide_reason_code:
             row.pop("reason_code")
+            row.pop("detected_problems", None)  # it names the reason code too
         return [row]
 
     def get_processor_events(self, a: ChargeArgs) -> list[dict[str, Any]]:

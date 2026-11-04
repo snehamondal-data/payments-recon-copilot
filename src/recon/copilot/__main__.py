@@ -67,6 +67,8 @@ def render_show(warehouse: ReadOnlyWarehouse, store: CopilotStore, exception_id:
             f"  proposed_action:        {d['proposed_action']}",
             f"  confidence:             {d['confidence']:.2f}",
             f"  needs_human_escalation: {d['needs_human_escalation']}"]
+    if d.get("secondary_issues"):
+        out.append(f"  secondary_issues:       {', '.join(d['secondary_issues'])}")
     if p.is_fallback:
         out.append(f"  FALLBACK: {p.fallback_reason}")
     if p.policy_override:

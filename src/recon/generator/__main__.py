@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections import Counter
 from datetime import date
 
@@ -21,14 +22,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--transactions", type=int, default=DEFAULT_TRANSACTIONS)
     parser.add_argument("--no-publish", action="store_true", help="write reference and ground-truth files only")
     parser.add_argument("--scenario", choices=SCENARIOS, default="standard",
-                        help="hard: the standard scenario plus two harder cases, built into data/hard/ "
+                        help="hard / multi: the standard scenario plus harder cases, built into data/<scenario>/ "
                              "(loaded directly, never published to the dev topics)")
     args = parser.parse_args(argv)
 
-    if args.scenario == "hard":
+    if args.scenario in ("hard", "multi"):
         from recon.evals.hard import build_hard
 
-        build_hard(seed=args.seed, as_of=args.as_of)
+        # Each harder scenario has its own default seed (hard: 42, multi: 2027) unless --seed is given.
+        build_hard(args.scenario, seed=args.seed if "--seed" in (argv or sys.argv[1:]) else None, as_of=args.as_of)
         return
 
     scenario = build_scenario(args.seed, args.as_of, args.transactions)

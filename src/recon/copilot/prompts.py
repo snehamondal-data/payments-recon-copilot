@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from recon.copilot.contract import LOW_CONFIDENCE_THRESHOLD, contract_table
 
-PROMPT_VERSION = "copilot-v1"
+PROMPT_VERSION = "copilot-v2"  # v2: secondary_issues (more than one problem means escalate)
 
 ROOT_CAUSES = """\
 - missing_settlement: the processor charged, but the bank never settled it within T+2 business days.
@@ -51,6 +51,8 @@ Rules:
   the records that prove the root cause, not every record you saw.
 - needs_human_escalation is true exactly when proposed_action is escalate_to_human.
 - If two explanations fit, or you are not sure, choose ambiguous and escalate_to_human. Do not guess.
+- If you find more than one problem on the same item, put the main one in root_cause and every other one in \
+secondary_issues, and choose escalate_to_human: one action can't fix two problems.
 - A diagnosis with confidence below {LOW_CONFIDENCE_THRESHOLD} is escalated to a human automatically.
 """
 

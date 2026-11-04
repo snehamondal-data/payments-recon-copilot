@@ -12,6 +12,11 @@
 --   currency_rounding             ledger differs from bank by a cent or two on a non-USD charge
 --   (ambiguous again)             ledger differs from bank and no rule above explains it
 --   date_mismatch                 amounts tie, but the ledger dates it on a different day (timing only)
+--
+-- More than one problem on one charge: every problem is also detected on its own (the has_* flags). If a
+-- charge has two or more, reason_code is ambiguous (so it is escalated) and detected_problems lists them
+-- all, so the reviewer sees each one. The priority order above still picks the primary problem, which
+-- sets amount_minor. Timing-only date differences don't count as a second problem.
 
 with charges as (
     select * from {{ ref('int_processor_charges') }}
@@ -112,9 +117,48 @@ measured as (
     from joined
 ),
 
-reasoned as (
+flagged as (
     select
         measured.*,
+        charge_delivery_count > 1 as has_duplicate_webhook,
+        sale_journal_count = 0 as has_missing_ledger_entry,
+        not is_settled and window_closed as has_missing_settlement,
+        disputes_usd_minor > 0 and ledger_chargebacks_minor = 0 as has_chargeback,
+        unbooked_refund_minor > 0 as has_partial_refund_not_in_ledger,
+        is_settled and bank_settled_net_minor <> expected_net_minor as has_fee_mismatch,
+        -- Rounding only means something on a single, booked, correctly settled sale.
+        is_settled and sale_journal_count = 1 and charge_delivery_count = 1
+            and bank_settled_net_minor = expected_net_minor
+            and currency <> 'USD' and ledger_vs_bank_minor <> 0
+            and abs(ledger_vs_bank_minor) <= {{ var('fx_rounding_tolerance_minor') }} as has_currency_rounding
+    from measured
+),
+
+counted as (
+    select
+        flagged.*,
+        case when has_duplicate_webhook then 1 else 0 end
+            + case when has_missing_ledger_entry then 1 else 0 end
+            + case when has_missing_settlement then 1 else 0 end
+            + case when has_chargeback then 1 else 0 end
+            + case when has_partial_refund_not_in_ledger then 1 else 0 end
+            + case when has_fee_mismatch then 1 else 0 end
+            + case when has_currency_rounding then 1 else 0 end as problem_count,
+        rtrim({{ dbt.concat([
+            "case when has_duplicate_webhook then 'duplicate_webhook,' else '' end",
+            "case when has_missing_ledger_entry then 'missing_ledger_entry,' else '' end",
+            "case when has_missing_settlement then 'missing_settlement,' else '' end",
+            "case when has_chargeback then 'chargeback,' else '' end",
+            "case when has_partial_refund_not_in_ledger then 'partial_refund_not_in_ledger,' else '' end",
+            "case when has_fee_mismatch then 'fee_mismatch,' else '' end",
+            "case when has_currency_rounding then 'currency_rounding,' else '' end",
+        ]) }}, ',') as problem_list
+    from flagged
+),
+
+prioritised as (
+    select
+        counted.*,
         case
             when ambiguous_line_id is not null then 'ambiguous'
             -- The deposit is short by exactly a refund that is neither in the ledger nor debited
@@ -136,8 +180,23 @@ reasoned as (
             -- A difference no rule explains is for a human, not a guess.
             when ledger_vs_bank_minor <> 0 then 'ambiguous'
             when first_posting_date <> charge_date_utc then 'date_mismatch'
-        end as reason_code
-    from measured
+        end as primary_reason_code
+    from counted
+),
+
+reasoned as (
+    select
+        prioritised.*,
+        case
+            when primary_reason_code is not null and problem_count > 1 then 'ambiguous'
+            else primary_reason_code
+        end as reason_code,
+        case
+            when primary_reason_code is null then null
+            when problem_list <> '' then problem_list
+            else primary_reason_code
+        end as detected_problems
+    from prioritised
 )
 
 select
@@ -147,8 +206,8 @@ select
         when not is_settled then 'pending_in_window'
         else 'matched'
     end as window_status,
-    -- The amount at stake for this reason, in USD cents (0 when only the timing differs).
-    case reason_code
+    -- The amount at stake for the primary problem, in USD cents (0 when only the timing differs).
+    case primary_reason_code
         when 'ambiguous' then
             case
                 when not is_settled then expected_net_minor

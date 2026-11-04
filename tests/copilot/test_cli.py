@@ -7,6 +7,7 @@ import duckdb
 import pytest
 
 from fakes import FakeModelClient, call, submit
+from recon.copilot.prompts import PROMPT_VERSION
 from recon.config import load_settings
 from recon.copilot.__main__ import main
 from recon.copilot.tools import ReadOnlyWarehouse, ToolSession, open_read_only
@@ -130,7 +131,7 @@ def test_the_audit_log_has_every_step(cli, fee_script):
     assert review == {"decision": "approved", "reviewer": "sneha", "reason": "ok",
                       "action": "raise_fee_claim_with_processor", "root_cause": "fee_mismatch"}
     assert all(e["created_at"] is not None and e["model"] == "fake-model" for e in events)
-    assert all(e["prompt_version"] == "copilot-v1" for e in events if e["event_type"] != "review"
+    assert all(e["prompt_version"] == PROMPT_VERSION for e in events if e["event_type"] != "review"
                and e["event_type"] != "resolution_applied")
 
 

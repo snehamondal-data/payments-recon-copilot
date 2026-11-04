@@ -30,10 +30,11 @@ AS_OF ?= 2026-10-15
 recon:
 	.venv/bin/dbt build --project-dir dbt --profiles-dir dbt --vars "{as_of: '$(AS_OF)'}"
 
-# The two harder cases (python -m recon.generator --scenario hard first), in their own folder.
+# The harder cases (python -m recon.generator --scenario hard|multi first), each in its own folder.
+SCENARIO ?= hard
 recon-hard:
-	DUCKDB_PATH=data/hard/warehouse.duckdb .venv/bin/dbt build --project-dir dbt --profiles-dir dbt \
-		--target-path ../data/hard/target --log-path ../data/hard/logs --vars "{as_of: '$(AS_OF)'}"
+	DUCKDB_PATH=data/$(SCENARIO)/warehouse.duckdb .venv/bin/dbt build --project-dir dbt --profiles-dir dbt \
+		--target-path ../data/$(SCENARIO)/target --log-path ../data/$(SCENARIO)/logs --vars "{as_of: '$(AS_OF)'}"
 
 # Snowflake (project-scale trial). Load with: WAREHOUSE_ENGINE=snowflake make load
 recon-snowflake:

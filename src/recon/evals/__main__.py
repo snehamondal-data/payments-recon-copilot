@@ -67,8 +67,10 @@ def main(argv: list[str] | None = None) -> int:
     se.add_argument("--rescore", action="store_true",
                     help="score the saved answers again with the current scorer (no model calls)")
     h = sub.add_parser("hard", help="the two harder cases (--scenario hard): SQL classification and the copilot")
-    h.add_argument("--model", required=True, choices=MODELS)
-    h.add_argument("--mode", required=True, choices=MODES)
+    h.add_argument("--scenario", choices=["hard", "multi"], default="hard")
+    h.add_argument("--sql-only", action="store_true", help="reconciliation's classification only; no model call")
+    h.add_argument("--model", choices=MODELS)
+    h.add_argument("--mode", choices=MODES)
     se.add_argument("--prompt-version", help="which saved run to rescore (default: the current ask prompt)")
     args = parser.parse_args(argv)
     if settings.warehouse_engine != "duckdb":
@@ -78,9 +80,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "hard":  # its own warehouse and ground truth in data/hard/; never the standard ones
-        from recon.evals.hard import run_hard
+        from recon.evals.hard import run_hard, sql_report
 
-        results = run_hard(args.model, args.mode)
+        if args.sql_only:
+            sql_report(args.scenario)
+            return 0
+        if not (args.model and args.mode):
+            parser.error("hard needs --model and --mode (or --sql-only)")
+        results = run_hard(args.model, args.mode, args.scenario)
         print(json.dumps(results, indent=2, default=str))
         return 0
 

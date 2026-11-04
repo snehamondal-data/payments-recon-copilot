@@ -27,6 +27,9 @@ models:
                   - currency_rounding
                   - date_mismatch
                   - orphan_bank_deposit
+      - name: detected_problems
+        description: Every problem found on the item, comma-separated. More than one means reason_code is ambiguous.
+        data_tests: [not_null]
       - name: amount_minor
         data_tests: [not_null]
       - name: age_business_days

@@ -75,6 +75,10 @@ class Diagnosis(BaseModel):
     proposed_action: ProposedAction = Field(description="Must be allowed for the root cause (see the contract).")
     confidence: Annotated[float, Field(ge=0, le=1)] = Field(description="0 to 1.")
     needs_human_escalation: bool = Field(description="True exactly when proposed_action is escalate_to_human.")
+    secondary_issues: Annotated[list[RootCause], Field(max_length=5)] = Field(
+        default_factory=list,
+        description="Any other problem you found on the same item, besides root_cause. Non-empty means "
+                    "proposed_action must be escalate_to_human: one action can't fix two problems.")
     rationale: Annotated[str, Field(min_length=1, max_length=600)] = Field(
         description="Two or three sentences a reviewer can check against the evidence.")
 
@@ -91,6 +95,13 @@ def contract_violations(d: Diagnosis, returned_record_ids: set[str]) -> list[str
                         f"{d.root_cause.value!r}; allowed: {allowed}")
     if d.needs_human_escalation != (d.proposed_action == A.ESCALATE_TO_HUMAN):
         problems.append("needs_human_escalation must be true exactly when proposed_action is escalate_to_human")
+    # More than one problem: no single action fixes both, so only an escalation may stand. Enforced here,
+    # on the structured field, never by reading the rationale.
+    if d.secondary_issues and d.proposed_action != A.ESCALATE_TO_HUMAN:
+        problems.append(f"secondary_issues lists other problems ({[i.value for i in d.secondary_issues]}), so "
+                        f"proposed_action must be escalate_to_human")
+    if d.root_cause in d.secondary_issues or len(set(d.secondary_issues)) != len(d.secondary_issues):
+        problems.append("secondary_issues must not repeat root_cause or each other")
     return problems
 
 
