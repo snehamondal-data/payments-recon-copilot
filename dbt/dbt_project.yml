@@ -28,3 +28,7 @@ models:
     marts:
       +schema: marts
       +materialized: table
+    # The semantic layer's grain and time spine (Slice 8), built next to the marts.
+    semantic:
+      +schema: marts
+      +materialized: table

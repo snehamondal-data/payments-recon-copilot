@@ -1,0 +1,120 @@
+version: 2
+
+models:
+  - name: recon_items
+    description: One row per reconciliation item at the as-of date (every charge, plus bank-line exceptions).
+    columns:
+      - name: item_id
+        data_tests: [unique, not_null]
+      - name: window_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [matched, pending_in_window, exception]
+  - name: metricflow_time_spine
+    description: Daily time spine for MetricFlow.
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
+
+semantic_models:
+  - name: recon_item
+    description: Reconciliation items (charges and bank-line exceptions) at an as-of date. Synthetic data.
+    model: ref('recon_items')
+    defaults:
+      agg_time_dimension: as_of_date
+    entities:
+      - name: item
+        type: primary
+        expr: item_id
+    dimensions:
+      - name: reason_code
+        type: categorical
+        description: Why an item doesn't tie out (empty for matched and pending items).
+      - name: window_status
+        type: categorical
+        description: matched, pending_in_window (unsettled but inside T+2) or exception.
+      - name: currency
+        type: categorical
+        description: The charge's original currency (USD, EUR or GBP); bank lines use their batch currency. Amounts are always USD.
+      - name: as_of_date
+        type: time
+        description: The date the reconciliation was run for.
+        type_params:
+          time_granularity: day
+    measures:
+      - name: queued_exceptions
+        agg: sum
+        expr: is_queued_exception
+      - name: amount_at_stake_minor
+        agg: sum
+        expr: case when is_queued_exception = 1 then amount_at_stake_minor else 0 end
+      - name: money_exceptions
+        agg: sum
+        expr: case when is_queued_exception = 1 and amount_at_stake_minor > 0 then 1 else 0 end
+      - name: pending_charges
+        agg: sum
+        expr: case when window_status = 'pending_in_window' then 1 else 0 end
+      - name: charges
+        agg: sum
+        expr: case when item_type = 'charge' then 1 else 0 end
+      - name: matched_charges
+        agg: sum
+        expr: case when item_type = 'charge' and window_status = 'matched' then 1 else 0 end
+
+metrics:
+  - name: exception_count
+    label: Exception count
+    description: How many items are in the exceptions queue, that is, things that don't tie out across processor, bank and ledger and need a person to look at them.
+    type: simple
+    type_params:
+      measure: queued_exceptions
+  - name: amount_at_risk
+    label: Amount at risk (USD)
+    description: The total money at stake across the exceptions queue, in US dollars. Timing-only differences count as zero.
+    type: simple
+    type_params:
+      measure: amount_at_stake_minor
+    config:
+      meta:
+        unit: usd_cents
+  - name: open_backlog
+    label: Open backlog
+    description: Exceptions that still have money at stake, so someone has to move or claim money to close them. Timing-only differences (no money at stake) are left out.
+    type: simple
+    type_params:
+      measure: money_exceptions
+  - name: pending_count
+    label: Pending settlements
+    description: Charges the bank hasn't settled yet but whose T+2 business-day settlement window is still open, so they are not exceptions yet.
+    type: simple
+    type_params:
+      measure: pending_charges
+  - name: match_rate
+    label: Match rate
+    description: The share of charges that tie out across processor, bank and ledger, as a fraction between 0 and 1.
+    type: ratio
+    type_params:
+      numerator: matched_charges
+      denominator: charges
+  # Building blocks for match_rate (ratio metrics are made of metrics). Not offered to the ask agent.
+  - name: matched_charges
+    label: Matched charges
+    description: Charges that tie out across processor, bank and ledger.
+    type: simple
+    type_params:
+      measure: matched_charges
+    config:
+      meta:
+        internal: true
+  - name: charges
+    label: Charges
+    description: Every charge the processor reported.
+    type: simple
+    type_params:
+      measure: charges
+    config:
+      meta:
+        internal: true

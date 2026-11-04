@@ -45,6 +45,7 @@ flowchart LR
 - **Copilot:** investigates one exception and returns a validated diagnosis with cited evidence, or falls back to escalation.
 - **Review CLI:** a human approves, rejects or resolves; approving writes a resolution record and never touches source data.
 - **Audit log:** every tool call, model output, policy override and review decision, append-only.
+- **Semantic layer:** five metrics defined in dbt (MetricFlow), so `ask` can answer questions about the whole picture through one typed tool.
 - **Airflow:** runs the daily load, dbt build and pending-settlement re-check on Snowflake; the copilot is not scheduled.
 - **Ground truth and evals:** the planted answers live in a separate file that only the evals read, never the loader, dbt or the agent.
 
@@ -241,6 +242,10 @@ already loaded everything.
   and nothing else: no writes, and no access at all to the copilot schema. The audit log and
   resolutions are written by the loader role. Both users are key-pair service users with no password,
   and tests probe every kind of write.
+- **A semantic layer instead of text-to-SQL for questions.** `ask` can only call `query_metric` with
+  validated arguments, and every number it states must match a value that tool returned. That is the
+  same rule as the copilot's tools: the model chooses what to look at, and code decides what it is
+  allowed to say.
 - **Secondary roles off.** New Snowflake users default to `DEFAULT_SECONDARY_ROLES = ('ALL')`, so a
   session quietly holds every role granted to the user. The role tests caught it; every connection now
   runs `USE SECONDARY ROLES NONE` and refuses to continue unless it holds exactly one role.
@@ -256,6 +261,7 @@ make generate && make load && make recon   # scenario -> Kafka -> DuckDB -> dbt 
 make test                 # unit tests: no Docker, no API calls, no Snowflake
 .venv/bin/python -m recon.copilot queue    # the exceptions queue
 .venv/bin/python -m recon.copilot diagnose charge:ch_...   # needs ANTHROPIC_API_KEY in .env
+.venv/bin/python -m recon.copilot ask "what is our match rate by currency?"
 ```
 
 - **Evals:** `python -m recon.evals estimate`, then `run` (costs API money; see [Results](#copilot-evals)).
@@ -263,6 +269,102 @@ make test                 # unit tests: no Docker, no API calls, no Snowflake
 - **Airflow:** `make airflow-up`, then `make airflow-backfill` and `make airflow-report` ([airflow/README.md](airflow/README.md)).
 - **Settings:** environment variables, see [.env.example](.env.example).
 - **Operating it:** [docs/DISCOVERY.md](docs/DISCOVERY.md), [docs/ROLLOUT.md](docs/ROLLOUT.md), [docs/RUNBOOK.md](docs/RUNBOOK.md).
+
+## Semantic layer
+
+For questions about the whole picture rather than one exception, there is a small semantic layer
+and an `ask` command:
+
+```bash
+.venv/bin/python -m recon.copilot ask "how much money is at risk by reason code?"
+```
+
+**dbt's own semantic layer, not a custom one.** MetricFlow (`dbt-metricflow` 0.15) installed cleanly
+alongside the pinned dbt-duckdb 1.11 and DuckDB 1.4.5. It added only `dbt-metricflow` and five small
+CLI helpers, and no pinned version moved. So the metrics are defined in dbt, in
+[dbt/models/semantic/_semantic.yml](dbt/models/semantic/_semantic.yml). They sit on one new model,
+`recon_items`: one row per charge, plus each bank-line exception. No existing model changed. It runs on
+DuckDB; the same models also build on Snowflake.
+
+| Metric | Unit | Plain-English definition |
+|---|---|---|
+| `exception_count` | count | items in the exceptions queue: things that don't tie out and need a person |
+| `amount_at_risk` | USD | total money at stake across the queue; timing-only differences count as zero |
+| `open_backlog` | count | exceptions that still have money at stake, so money has to be moved or claimed to close them |
+| `pending_count` | count | charges not settled yet but still inside their T+2 window, so not exceptions yet |
+| `match_rate` | fraction | the share of charges that tie out across processor, bank and ledger |
+
+Dimensions: `reason_code`, `window_status`, `currency` (the charge's original currency; amounts are
+always USD) and `as_of_date`.
+
+`open_backlog` does not mean "not yet resolved by a reviewer". Review state lives in the copilot's
+audit store, which neither agent is allowed to read. Here, open means money is still at stake.
+
+**How a question is answered:**
+
+1. The agent has exactly one data tool, `query_metric(metric, dimensions, filters)`. Its arguments are
+   validated by pydantic, so filter values must come from a closed set (the 10 reason codes, 3
+   currencies, real dates).
+2. MetricFlow compiles the typed request into SQL from dbt's semantic manifest.
+3. That SQL runs on the same locked-down read-only DuckDB connection the copilot's tools use. There is
+   no raw SQL anywhere.
+4. **Every number in the answer must be one that `query_metric` returned in that session**, with the
+   same metric, dimension values and filters. So the model can't make a figure up or do its own
+   arithmetic: a combined number has to be queried with a filter.
+5. A question the metrics can't answer gets `answerable: false`, and the code then lists the metrics
+   and dimensions it can answer.
+
+**A real example** (Sonnet 5.5, 1 metric query, 5.7s):
+
+```
+$ python -m recon.copilot ask "how much money is at risk by reason code?"
+Amount at risk by reason code (USD): missing_settlement 1154.40; duplicate_webhook 984.79;
+chargeback 728.40; orphan_bank_deposit 536.80; ambiguous 358.39; missing_ledger_entry 299.33;
+partial_refund_not_in_ledger 145.78; fee_mismatch 0.96; currency_rounding 0.03; date_mismatch 0.00
+(timing-only). Matched and pending items have no reason code and show 0.00.
+
+Figures (each one returned by query_metric):
+  amount_at_risk [reason_code=missing_settlement]: $1154.40
+  amount_at_risk [reason_code=duplicate_webhook]: $984.79
+  ...
+```
+
+**Eval.** Five questions, scored on exact numbers: to the cent, to 4 decimals for a rate, and exact for
+a count. The expected answers come from plain SQL on the existing marts, never through the semantic
+layer. They ran once on Sonnet 5.5, with prompt `ask-v1`, for $0.039 in total. Results are in
+[evals/results/semantic/](evals/results/semantic/).
+
+| Question | As first scored | After the scorer fix |
+|---|---|---|
+| How much money is at risk by reason code? | wrong | correct |
+| How many exceptions are in the queue, and how many still have money at stake? | correct | correct |
+| What is our match rate for each currency? | correct | correct |
+| How many charges are still waiting to settle inside their window, and in which currencies? | wrong | correct |
+| How much money is at risk from fee mismatches and chargebacks combined? | wrong | **wrong** |
+| **Total** | **2/5** | **4/5** |
+
+**What the scorer fix was, and why q5 stays wrong:**
+
+- **The bug.** The first scorer counted any figure outside the narrow expected set as wrong, including
+  true extra ones. In q1 that was the $0.00 row for items with no reason code; in q4, the overall
+  pending total of 3.
+- **The fix.** It now checks *every* stated figure against an independent plain-SQL value for its
+  metric, dimension values and filters. A figure it can't check counts as wrong. The same saved
+  answers were then re-scored with no new model call (`python -m recon.evals semantic --rescore`).
+- **q5.** The number, $729.36, is right for the question, and it came from a correctly filtered query.
+  But the answer format had no place to record that filter, so the figure as saved claims the *total*
+  amount at risk is $729.36 (it is $4,208.88). A reader of the figures table would be misled, so it
+  stays wrong.
+- **The schema fix (`ask-v2`).** Figures now carry their filters, the grounding check requires them,
+  and `ask` prints them. The eval has not been re-run since that change.
+
+**What this doesn't show:**
+
+- 5 questions, run once, is a smoke test, not a measurement.
+- Refusing an unanswerable question is covered by unit tests with a scripted model. It was not
+  measured live.
+- `ask` runs on DuckDB only. The models build on Snowflake, but the semantic manifest is compiled
+  against the local warehouse.
 
 ## How it works
 
@@ -609,5 +711,6 @@ this slice.
 | 5 | Snowflake: same loader, dbt and tools on a second engine, parity check, least-privilege roles |
 | 6 | Airflow (Astro CLI): `recon_daily` with the logical date as the as-of date |
 | 7 | This README and the FDE documents in [docs/](docs/) |
+| 8 | Semantic layer: five dbt (MetricFlow) metrics and the `ask` command |
 
 The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).

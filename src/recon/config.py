@@ -57,6 +57,8 @@ class Settings:
     copilot_timeout_s: float = 90.0
     copilot_hide_reason_code: bool = False
     copilot_effort: str = "medium"
+    # Semantic layer (Slice 8): written by dbt build (make recon).
+    semantic_manifest_path: Path = Path("dbt/target/semantic_manifest.json")
     # Snowflake (Slice 5). The engine picks where the loader writes and where the copilot reads.
     warehouse_engine: str = "duckdb"
     snowflake: SnowflakeSettings | None = None
@@ -94,6 +96,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         copilot_timeout_s=float(env.get("COPILOT_TIMEOUT_S", "90")),
         copilot_hide_reason_code=_flag(env.get("COPILOT_HIDE_REASON_CODE", "false")),
         copilot_effort=env.get("COPILOT_EFFORT", "medium"),
+        semantic_manifest_path=Path(env.get("SEMANTIC_MANIFEST_PATH", "dbt/target/semantic_manifest.json")),
         warehouse_engine=env.get("WAREHOUSE_ENGINE", "duckdb"),
         snowflake=SnowflakeSettings(
             account=env.get("SNOWFLAKE_ACCOUNT", ""),

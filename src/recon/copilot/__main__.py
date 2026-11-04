@@ -1,4 +1,4 @@
-"""Review CLI: python -m recon.copilot {queue,diagnose,show,approve,reject,resolve} ..."""
+"""Review CLI: python -m recon.copilot {queue,diagnose,show,approve,reject,resolve,ask} ..."""
 
 from __future__ import annotations
 
@@ -118,7 +118,27 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--root-cause", help="override the proposal's root cause (required when it was ambiguous)")
     r.add_argument("--reason", required=True)
     r.add_argument("--reviewer", default=getpass.getuser())
+    a = sub.add_parser("ask", help="a question about the whole picture, answered from the semantic layer's metrics")
+    a.add_argument("question")
     return parser
+
+
+def run_ask(settings: Settings, question: str, client_factory, out: Callable[[str], None]) -> int:
+    """The semantic layer is built by dbt on DuckDB; the agent's only data tool is query_metric."""
+    from recon.semantic.ask import Asker, render
+    from recon.semantic.layer import SemanticLayer
+
+    if settings.warehouse_engine != "duckdb":
+        out("error: ask runs on the DuckDB semantic layer; unset WAREHOUSE_ENGINE")
+        return 2
+    layer = SemanticLayer(settings.semantic_manifest_path, settings.duckdb_path,
+                          forbidden_paths=settings.agent_forbidden_paths())
+    try:
+        factory = client_factory or (lambda s: AnthropicModelClient(s.recon_model, effort=s.copilot_effort))
+        out(render(Asker(factory(settings), layer).ask(question), layer))
+    finally:
+        layer.close()
+    return 0
 
 
 def open_warehouse(settings: Settings) -> ReadOnlyWarehouse:
@@ -141,6 +161,8 @@ def main(argv: list[str] | None = None, *, settings: Settings | None = None,
     load_dotenv()  # ANTHROPIC_API_KEY and RECON_MODEL live in .env; never in code
     settings = settings or load_settings()
     args = build_parser().parse_args(argv)
+    if args.command == "ask":
+        return run_ask(settings, args.question, client_factory, out)
     warehouse = open_warehouse(settings)
     store = open_store(settings)
     try:

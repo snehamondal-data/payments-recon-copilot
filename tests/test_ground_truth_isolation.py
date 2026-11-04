@@ -51,7 +51,7 @@ def test_main_warehouse_contains_no_ground_truth_tables(scenario, tmp_path):
         wh.close()
 
 
-@pytest.mark.parametrize("package", ["loader", "warehouse", "copilot"])
+@pytest.mark.parametrize("package", ["loader", "warehouse", "copilot", "semantic"])
 def test_loader_warehouse_and_copilot_code_never_reference_ground_truth(package):
     files = list((SRC / package).rglob("*.py"))
     assert files
