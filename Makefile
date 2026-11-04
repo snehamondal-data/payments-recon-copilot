@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 -include .env
 export
 
-.PHONY: venv up down generate load replay recon recon-snowflake parity test test-integration test-live test-snowflake eval-estimate eval-report airflow-up airflow-down airflow-test airflow-backfill airflow-report
+.PHONY: venv up down generate load replay recon recon-hard recon-snowflake parity test test-integration test-live test-snowflake eval-estimate eval-report airflow-up airflow-down airflow-test airflow-backfill airflow-report
 
 venv:
 	python3 -m venv .venv
@@ -29,6 +29,11 @@ replay:
 AS_OF ?= 2026-10-15
 recon:
 	.venv/bin/dbt build --project-dir dbt --profiles-dir dbt --vars "{as_of: '$(AS_OF)'}"
+
+# The two harder cases (python -m recon.generator --scenario hard first), in their own folder.
+recon-hard:
+	DUCKDB_PATH=data/hard/warehouse.duckdb .venv/bin/dbt build --project-dir dbt --profiles-dir dbt \
+		--target-path ../data/hard/target --log-path ../data/hard/logs --vars "{as_of: '$(AS_OF)'}"
 
 # Snowflake (project-scale trial). Load with: WAREHOUSE_ENGINE=snowflake make load
 recon-snowflake:

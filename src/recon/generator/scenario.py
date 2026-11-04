@@ -102,6 +102,9 @@ class Scenario:
     cases: list[PlantedCase]
     poison: list[PoisonMessage]
     redelivered: int
+    # Only for --scenario hard: each hard case's expected outcome, written to ground truth before any run.
+    hard_expectations: list = field(default_factory=list)
+    name: str = "standard"
 
     def expected_counts(self) -> dict[str, int]:
         """Rows the loader should end up with: unique valid messages, poison and redeliveries excluded."""

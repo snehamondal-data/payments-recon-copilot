@@ -8,7 +8,7 @@ from datetime import date
 
 from recon.config import load_settings
 from recon.fx import write_fx_csv
-from recon.generator import DEFAULT_TRANSACTIONS, build_scenario
+from recon.generator import DEFAULT_TRANSACTIONS, SCENARIOS, build_scenario
 from recon.generator.ground_truth import write_ground_truth
 from recon.generator.publish import publish
 
@@ -20,7 +20,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--as-of", type=date.fromisoformat, default=settings.as_of)
     parser.add_argument("--transactions", type=int, default=DEFAULT_TRANSACTIONS)
     parser.add_argument("--no-publish", action="store_true", help="write reference and ground-truth files only")
+    parser.add_argument("--scenario", choices=SCENARIOS, default="standard",
+                        help="hard: the standard scenario plus two harder cases, built into data/hard/ "
+                             "(loaded directly, never published to the dev topics)")
     args = parser.parse_args(argv)
+
+    if args.scenario == "hard":
+        from recon.evals.hard import build_hard
+
+        build_hard(seed=args.seed, as_of=args.as_of)
+        return
 
     scenario = build_scenario(args.seed, args.as_of, args.transactions)
     write_fx_csv(settings.fx_rates_path, scenario.fx_rates)

@@ -49,5 +49,17 @@ def write_ground_truth(path: Path, scenario: Scenario) -> None:
             scenario.seed, scenario.as_of, SETTLEMENT_WINDOW_BUSINESS_DAYS, scenario.content_hash(),
             len(scenario.messages), scenario.redelivered, json.dumps(scenario.expected_counts()),
         ))
+        if scenario.hard_expectations:  # --scenario hard only; the standard file has no such table
+            con.execute("""
+                CREATE TABLE hard_expectations (
+                    case_id VARCHAR PRIMARY KEY,
+                    expected_status VARCHAR NOT NULL,     -- matched | exception
+                    expected_reason_code VARCHAR,         -- NULL: must not be an exception
+                    should_escalate BOOLEAN NOT NULL,
+                    rationale VARCHAR NOT NULL
+                )""")
+            con.executemany("INSERT INTO hard_expectations VALUES (?, ?, ?, ?, ?)",
+                            [(e.case_id, e.expected_status, e.expected_reason_code, e.should_escalate, e.rationale)
+                             for e in scenario.hard_expectations])
     finally:
         con.close()

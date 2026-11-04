@@ -284,23 +284,14 @@ class _DiscardDLQ:
         pass
 
 
-def build_eval_warehouse(work: Path, *, seed: int, as_of: date) -> dict[str, str]:
-    """Generate the scenario into `work`: a fresh DuckDB warehouse built by dbt, plus the ground-truth file."""
-    from recon.generator import build_scenario
-    from recon.generator.ground_truth import write_ground_truth
+def load_without_kafka(warehouse_path: Path, scenario) -> None:
+    """Load a scenario's messages through the real Sink (contracts, DLQ log, idempotent inserts), with
+    Kafka's partition and offset numbering imitated. For private warehouses that must not touch the topics."""
     from recon.loader.schema import ensure_schema
     from recon.loader.sink import RawMessage, Sink, load_fx_rates
-    from recon.parity import dbt_build
     from recon.warehouse import DuckDBClient
 
-    work.mkdir(parents=True, exist_ok=True)
-    scenario = build_scenario(seed=seed, as_of=as_of)
-    paths = {"DUCKDB_PATH": str(work / "warehouse.duckdb"), "GROUND_TRUTH_PATH": str(work / "ground_truth.duckdb"),
-             "COPILOT_DB_PATH": str(work / "copilot.duckdb")}
-    for p in paths.values():
-        Path(p).unlink(missing_ok=True)
-    write_ground_truth(Path(paths["GROUND_TRUTH_PATH"]), scenario)
-    wh = DuckDBClient(paths["DUCKDB_PATH"])
+    wh = DuckDBClient(warehouse_path)
     try:
         ensure_schema(wh)
         load_fx_rates(wh, scenario.fx_rates)
@@ -314,6 +305,22 @@ def build_eval_warehouse(work: Path, *, seed: int, as_of: date) -> dict[str, str
         Sink(wh, _DiscardDLQ()).process(raws)
     finally:
         wh.close()
+
+
+def build_eval_warehouse(work: Path, *, seed: int, as_of: date) -> dict[str, str]:
+    """Generate the scenario into `work`: a fresh DuckDB warehouse built by dbt, plus the ground-truth file."""
+    from recon.generator import build_scenario
+    from recon.generator.ground_truth import write_ground_truth
+    from recon.parity import dbt_build
+
+    work.mkdir(parents=True, exist_ok=True)
+    scenario = build_scenario(seed=seed, as_of=as_of)
+    paths = {"DUCKDB_PATH": str(work / "warehouse.duckdb"), "GROUND_TRUTH_PATH": str(work / "ground_truth.duckdb"),
+             "COPILOT_DB_PATH": str(work / "copilot.duckdb")}
+    for p in paths.values():
+        Path(p).unlink(missing_ok=True)
+    write_ground_truth(Path(paths["GROUND_TRUTH_PATH"]), scenario)
+    load_without_kafka(Path(paths["DUCKDB_PATH"]), scenario)
     dbt_build("duckdb", scenario.as_of, work / "dbt", {"DUCKDB_PATH": paths["DUCKDB_PATH"]})
     return paths
 

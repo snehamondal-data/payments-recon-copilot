@@ -1,4 +1,4 @@
-"""python -m recon.evals {estimate,run,review-demo,metrics,report,semantic}"""
+"""python -m recon.evals {estimate,run,review-demo,metrics,report,semantic,hard}"""
 
 from __future__ import annotations
 
@@ -66,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     se.add_argument("--model", required=True, choices=MODELS)
     se.add_argument("--rescore", action="store_true",
                     help="score the saved answers again with the current scorer (no model calls)")
+    h = sub.add_parser("hard", help="the two harder cases (--scenario hard): SQL classification and the copilot")
+    h.add_argument("--model", required=True, choices=MODELS)
+    h.add_argument("--mode", required=True, choices=MODES)
     se.add_argument("--prompt-version", help="which saved run to rescore (default: the current ask prompt)")
     args = parser.parse_args(argv)
     if settings.warehouse_engine != "duckdb":
@@ -73,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
         # without the model (python -m recon.parity).
         print("evals run on DuckDB only; unset WAREHOUSE_ENGINE")
         return 2
+
+    if args.command == "hard":  # its own warehouse and ground truth in data/hard/; never the standard ones
+        from recon.evals.hard import run_hard
+
+        results = run_hard(args.model, args.mode)
+        print(json.dumps(results, indent=2, default=str))
+        return 0
 
     warehouse = ReadOnlyWarehouse(settings.duckdb_path, forbidden_paths=settings.agent_forbidden_paths())
     try:

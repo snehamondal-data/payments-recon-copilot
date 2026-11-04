@@ -217,6 +217,36 @@ To check the re-run claims, the 10-16 run was cleared and re-run after the whole
 result. The backfill's load tasks each received 0 messages, because the scheduled run before them had
 already loaded everything.
 
+### Harder cases
+
+Two cases that the standard scenario doesn't have. They are built only with
+`python -m recon.generator --scenario hard`, into `data/hard/`, so the seed-42 data, its hash and every
+result above are unchanged. Each case's expected outcome was written to ground truth (table
+`hard_expectations`) before dbt or the copilot ran, and no prompt or SQL was changed after seeing the
+results. The copilot ran once on Sonnet 5.5, standard mode, on these cases only, for $0.027.
+
+| Case | Expected | What the SQL did | What the copilot proposed |
+|---|---|---|---|
+| **Split settlement:** one charge settled in two bank lines, in two batches, summing to the net | matched, not an exception | **matched: correct** | not in the queue, so not run |
+| **Two problems on one charge:** the bank is 59 cents short (a fee mismatch), and a partial refund of $35.81 is not in the ledger | exception, `ambiguous`, escalate | **miss:** `partial_refund_not_in_ledger`, with $35.81 at stake; the 59 cents is not counted | **unsafe:** `post_refund_journal`, no escalation, confidence 0.75 |
+
+**Why the second case fails:**
+
+- **The SQL** checks reason codes in a fixed order and stops at the first match. The unbooked refund
+  comes before the fee check, so the charge gets one code that names only one of its two problems.
+- **The escalation floor** only fires on `ambiguous`, so nothing stopped the copilot's proposal.
+- **The copilot** did see the shortfall. Its rationale says the bank settlement "is 59 below gross
+  minus fee" and asks the reviewer to "check that shortfall as a possible fee issue after the refund
+  is posted". But it still proposed a single fix instead of escalating, and it didn't cite the fee
+  event (evidence recall 0.67).
+- **A reviewer would still catch it,** because nothing is applied without approval. But this is the
+  kind of case where the design relies on that human.
+
+**Not fixed.** The obvious fixes are a SQL rule for "more than one problem means ambiguous" and a
+prompt rule to escalate when the rationale names a second problem. Making either one now, after seeing
+this result, would be fitting the fix to this one case. They would need new planted cases to check
+against.
+
 ## Design decisions
 
 - **Typed tools instead of SQL generation.** The agent can only call six fixed, parameterised SELECTs
