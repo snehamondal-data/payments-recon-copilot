@@ -13,7 +13,7 @@ from recon.semantic.layer import MetricQuery, SemanticLayer
 # What a correct agent would query for each question.
 QUERIES = {
     "q1-risk-by-reason": [{"metric": "amount_at_risk", "dimensions": ["reason_code"]}],
-    "q2-queue-and-money": [{"metric": "exception_count"}, {"metric": "open_backlog"}],
+    "q2-queue-and-money": [{"metric": "exception_count"}, {"metric": "exceptions_with_money_at_stake"}],
     "q3-match-rate-by-currency": [{"metric": "match_rate", "dimensions": ["currency"]}],
     "q4-pending-by-currency": [{"metric": "pending_count", "dimensions": ["currency"]}],
     "q5-fee-and-chargeback-combined": [{"metric": "amount_at_risk", "filters": [

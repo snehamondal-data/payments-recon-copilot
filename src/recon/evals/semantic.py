@@ -19,7 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from recon.evals.pricing import cost_usd
-from recon.semantic.ask import AskResult, _number
+from recon.semantic.ask import ASK_PROMPT_VERSION, AskResult, _number
+
+# Metrics renamed after a run was recorded. Saved answers keep the name the model used; scoring maps it.
+LEGACY_METRIC_NAMES = {"open_backlog": "exceptions_with_money_at_stake"}
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ class SemanticScore:
     question: str
     model: str
     correct: bool
+    prompt_version: str = "ask-v1"  # the first run predates this field; it was ask-v1
     missing: list[Any] = field(default_factory=list)
     wrong: list[Any] = field(default_factory=list)
     answerable: bool = True
@@ -96,8 +100,8 @@ _QUEUE_FROM = """FROM marts.recon_exceptions AS e
     LEFT JOIN staging.stg_bank_settlement_lines AS l ON l.line_id = e.bank_line_id
     LEFT JOIN raw.bank_settlement_batches AS b ON b.batch_id = l.batch_id"""
 _QUEUE = {"exception_count": "count(*)", "amount_at_risk": "coalesce(sum(e.amount_minor), 0)",
-          "open_backlog": "count(*) FILTER (WHERE e.amount_minor > 0)"}
-_UNIT = {"exception_count": "count", "amount_at_risk": "USD", "open_backlog": "count", "pending_count": "count",
+          "exceptions_with_money_at_stake": "count(*) FILTER (WHERE e.amount_minor > 0)"}
+_UNIT = {"exception_count": "count", "amount_at_risk": "USD", "exceptions_with_money_at_stake": "count", "pending_count": "count",
          "match_rate": "fraction"}
 
 
@@ -165,7 +169,8 @@ def score_figures(question: Question, expected: dict[str | None, list[str]], fig
     zero = _value(0, question.unit)
     wrong = []
     for f in figures:
-        actual = figure_truth(con, f["metric"], f["group"], f.get("filters", []))
+        metric = LEGACY_METRIC_NAMES.get(f["metric"], f["metric"])
+        actual = figure_truth(con, metric, f["group"], f.get("filters", []))
         if actual is None or _number(f["value"]) != actual:
             wrong.append(f | {"sql_says": actual})
     if question.key is None:
@@ -187,7 +192,7 @@ def score(question: Question, expected: dict[str | None, list[str]], run: AskRes
         missing=missing, wrong=wrong, answerable=a.answerable, is_fallback=run.is_fallback,
         fallback_reason=run.fallback_reason, answer=a.answer, figures=figures,
         expected={str(k): v for k, v in expected.items()}, queries=len(run.queries), input_tokens=run.input_tokens,
-        output_tokens=run.output_tokens, latency_s=run.latency_s)
+        output_tokens=run.output_tokens, latency_s=run.latency_s, prompt_version=ASK_PROMPT_VERSION)
     s.cost_usd = cost_usd(run.model, input_tokens=run.input_tokens, output_tokens=run.output_tokens,
                           cache_creation_input_tokens=run.cache_creation_input_tokens,
                           cache_read_input_tokens=run.cache_read_input_tokens)

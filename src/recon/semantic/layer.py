@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from recon.copilot.contract import RootCause
 from recon.copilot.tools import open_read_only
 
-Metric = Literal["exception_count", "amount_at_risk", "open_backlog", "pending_count", "match_rate"]
+Metric = Literal["exception_count", "amount_at_risk", "exceptions_with_money_at_stake", "pending_count", "match_rate"]
 Dimension = Literal["reason_code", "window_status", "currency", "as_of_date"]
 METRICS: tuple[str, ...] = Metric.__args__
 DIMENSIONS: tuple[str, ...] = Dimension.__args__

@@ -66,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     se.add_argument("--model", required=True, choices=MODELS)
     se.add_argument("--rescore", action="store_true",
                     help="score the saved answers again with the current scorer (no model calls)")
+    se.add_argument("--prompt-version", help="which saved run to rescore (default: the current ask prompt)")
     args = parser.parse_args(argv)
     if settings.warehouse_engine != "duckdb":
         # Evals spend API budget per run; they are measured once, on DuckDB. Snowflake parity is checked
@@ -100,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             from recon.copilot.model_client import AnthropicModelClient
             from recon.copilot.tools import open_read_only
             from recon.evals.semantic import report, run_semantic_eval
-            from recon.semantic.ask import Asker
+            from recon.semantic.ask import ASK_PROMPT_VERSION, Asker
             from recon.semantic.layer import SemanticLayer
 
             layer = SemanticLayer(settings.semantic_manifest_path, settings.duckdb_path,
@@ -110,10 +111,13 @@ def main(argv: list[str] | None = None) -> int:
                 if args.rescore:
                     from recon.evals.semantic import rescore
 
-                    print(report(rescore(truth_con, SEMANTIC_RESULTS_DIR / f"{args.model}.jsonl")))
+                    version = args.prompt_version or ASK_PROMPT_VERSION
+                    print(report(rescore(truth_con, SEMANTIC_RESULTS_DIR / f"{args.model}__{version}.jsonl")))
                     return 0
                 asker = Asker(AnthropicModelClient(args.model, effort=settings.copilot_effort), layer)
-                scores = run_semantic_eval(asker, truth_con, SEMANTIC_RESULTS_DIR / f"{args.model}.jsonl")
+                # One file per prompt version: a recorded run is never overwritten or mixed with another.
+                scores = run_semantic_eval(asker, truth_con,
+                                           SEMANTIC_RESULTS_DIR / f"{args.model}__{ASK_PROMPT_VERSION}.jsonl")
                 print(report(scores))
             finally:
                 truth_con.close()

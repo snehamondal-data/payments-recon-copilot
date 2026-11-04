@@ -290,15 +290,17 @@ DuckDB; the same models also build on Snowflake.
 |---|---|---|
 | `exception_count` | count | items in the exceptions queue: things that don't tie out and need a person |
 | `amount_at_risk` | USD | total money at stake across the queue; timing-only differences count as zero |
-| `open_backlog` | count | exceptions that still have money at stake, so money has to be moved or claimed to close them |
+| `exceptions_with_money_at_stake` | count | exceptions that still have money at stake, so money has to be moved or claimed to close them |
 | `pending_count` | count | charges not settled yet but still inside their T+2 window, so not exceptions yet |
 | `match_rate` | fraction | the share of charges that tie out across processor, bank and ledger |
 
 Dimensions: `reason_code`, `window_status`, `currency` (the charge's original currency; amounts are
 always USD) and `as_of_date`.
 
-`open_backlog` does not mean "not yet resolved by a reviewer". Review state lives in the copilot's
-audit store, which neither agent is allowed to read. Here, open means money is still at stake.
+**Not a reviewer backlog.** `exceptions_with_money_at_stake` counts exceptions that still have money
+at stake, whether or not a reviewer has resolved them. Review state lives in the copilot's audit store,
+which neither agent is allowed to read. A true reviewer backlog (exceptions not yet resolved) needs
+resolutions to flow into the warehouse. That is **future work**.
 
 **How a question is answered:**
 
@@ -331,36 +333,36 @@ Figures (each one returned by query_metric):
 
 **Eval.** Five questions, scored on exact numbers: to the cent, to 4 decimals for a rate, and exact for
 a count. The expected answers come from plain SQL on the existing marts, never through the semantic
-layer. They ran once on Sonnet 5.5, with prompt `ask-v1`, for $0.039 in total. Results are in
-[evals/results/semantic/](evals/results/semantic/).
+layer. There were two live runs on Sonnet 5.5, $0.039 each, one per prompt version. Results are in
+[evals/results/semantic/](evals/results/semantic/), one file per prompt version.
 
-| Question | As first scored | After the scorer fix |
-|---|---|---|
-| How much money is at risk by reason code? | wrong | correct |
-| How many exceptions are in the queue, and how many still have money at stake? | correct | correct |
-| What is our match rate for each currency? | correct | correct |
-| How many charges are still waiting to settle inside their window, and in which currencies? | wrong | correct |
-| How much money is at risk from fee mismatches and chargebacks combined? | wrong | **wrong** |
-| **Total** | **2/5** | **4/5** |
+| Question | `ask-v1`, as first scored | `ask-v1`, after the scorer fix | `ask-v2` |
+|---|---|---|---|
+| How much money is at risk by reason code? | wrong | correct | correct |
+| How many exceptions are in the queue, and how many still have money at stake? | correct | correct | correct |
+| What is our match rate for each currency? | correct | correct | correct |
+| How many charges are still waiting to settle inside their window, and in which currencies? | wrong | correct | correct |
+| How much money is at risk from fee mismatches and chargebacks combined? | wrong | wrong | correct |
+| **Total** | **2/5** | **4/5** | **5/5** |
 
-**What the scorer fix was, and why q5 stays wrong:**
+Why each score changed:
 
-- **The bug.** The first scorer counted any figure outside the narrow expected set as wrong, including
-  true extra ones. In q1 that was the $0.00 row for items with no reason code; in q4, the overall
-  pending total of 3.
-- **The fix.** It now checks *every* stated figure against an independent plain-SQL value for its
-  metric, dimension values and filters. A figure it can't check counts as wrong. The same saved
-  answers were then re-scored with no new model call (`python -m recon.evals semantic --rescore`).
-- **q5.** The number, $729.36, is right for the question, and it came from a correctly filtered query.
-  But the answer format had no place to record that filter, so the figure as saved claims the *total*
-  amount at risk is $729.36 (it is $4,208.88). A reader of the figures table would be misled, so it
-  stays wrong.
-- **The schema fix (`ask-v2`).** Figures now carry their filters, the grounding check requires them,
-  and `ask` prints them. The eval has not been re-run since that change.
+- **2/5, `ask-v1` as first scored:** the scorer had a bug. It counted true extra figures as wrong, such
+  as an overall total stated alongside the breakdown that was asked for.
+- **4/5, after the scorer fix:** every stated figure is now checked against plain SQL for its metric,
+  dimension values and filters. The *same saved answers* were re-scored, with no new model call. q5
+  stays wrong because its figure didn't record the filter it came from, so as saved it claims the total
+  amount at risk is $729.36 (the total is $4,208.88).
+- **5/5, `ask-v2`, one fresh run:** figures now carry their filters, and the grounding check requires
+  them. q5's $729.36 is recorded with its `reason_code in fee_mismatch, chargeback` filter.
+
+The metric was named `open_backlog` when `ask-v1` ran. The saved `ask-v1` answers keep the name the
+model used, and the scorer maps it to `exceptions_with_money_at_stake`.
 
 **What this doesn't show:**
 
-- 5 questions, run once, is a smoke test, not a measurement.
+- 5 questions, one run per prompt version, is a smoke test, not a measurement. The `ask-v2` change
+  was made after seeing the `ask-v1` answers, on these same questions, so 5/5 is not a held-out result.
 - Refusing an unanswerable question is covered by unit tests with a scripted model. It was not
   measured live.
 - `ask` runs on DuckDB only. The models build on Snowflake, but the semantic manifest is compiled

@@ -83,7 +83,7 @@ def test_an_unanswerable_question_says_so_and_lists_what_it_can_answer(layer):
     assert not run.is_fallback and not run.answer.answerable
     out = render(run, layer)
     assert "I can answer questions about these metrics" in out
-    for metric in ("exception_count", "amount_at_risk", "open_backlog", "pending_count", "match_rate"):
+    for metric in ("exception_count", "amount_at_risk", "exceptions_with_money_at_stake", "pending_count", "match_rate"):
         assert metric in out
 
 

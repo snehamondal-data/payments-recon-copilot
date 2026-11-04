@@ -49,7 +49,7 @@ def test_catalog_is_the_five_metrics_each_described_in_plain_english(layer):
     for m in layer.catalog.values():
         assert len(m.description) >= 60 and m.description[0].isupper(), m.name
     assert {m.name: m.unit for m in layer.catalog.values()} == {
-        "exception_count": "count", "amount_at_risk": "USD", "open_backlog": "count", "pending_count": "count",
+        "exception_count": "count", "amount_at_risk": "USD", "exceptions_with_money_at_stake": "count", "pending_count": "count",
         "match_rate": "fraction"}
 
 
@@ -67,11 +67,11 @@ def test_amount_at_risk(layer, sql):
     assert nonzero(q(layer, "amount_at_risk", ["reason_code"])) == {(k,): usd(v) for k, v in by_reason if v}
 
 
-def test_open_backlog_is_exceptions_with_money_at_stake(layer, sql):
-    assert q(layer, "open_backlog") == {(): sql("SELECT count(*) FROM marts.recon_exceptions WHERE amount_minor > 0")[0][0]}
+def test_exceptions_with_money_at_stake(layer, sql):
+    assert q(layer, "exceptions_with_money_at_stake") == {(): sql("SELECT count(*) FROM marts.recon_exceptions WHERE amount_minor > 0")[0][0]}
     by_reason = sql("SELECT reason_code, count(*) FROM marts.recon_exceptions WHERE amount_minor > 0 GROUP BY 1")
-    assert nonzero(q(layer, "open_backlog", ["reason_code"])) == {(k,): v for k, v in by_reason}
-    assert "date_mismatch" not in {k[0] for k in nonzero(q(layer, "open_backlog", ["reason_code"]))}
+    assert nonzero(q(layer, "exceptions_with_money_at_stake", ["reason_code"])) == {(k,): v for k, v in by_reason}
+    assert "date_mismatch" not in {k[0] for k in nonzero(q(layer, "exceptions_with_money_at_stake", ["reason_code"]))}
 
 
 def test_pending_count(layer, sql):

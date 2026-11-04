@@ -80,8 +80,8 @@ metrics:
     config:
       meta:
         unit: usd_cents
-  - name: open_backlog
-    label: Open backlog
+  - name: exceptions_with_money_at_stake
+    label: Exceptions with money at stake
     description: Exceptions that still have money at stake, so someone has to move or claim money to close them. Timing-only differences (no money at stake) are left out.
     type: simple
     type_params:
