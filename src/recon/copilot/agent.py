@@ -21,9 +21,10 @@ from recon.copilot.contract import (
     RootCause,
     validate_submission,
 )
+from recon.copilot.backend import BackendUnavailable, InProcessBackend, ToolBackend
 from recon.copilot.model_client import ModelClient
 from recon.copilot.prompts import PROMPT_VERSION, first_message, system_prompt
-from recon.copilot.tools import ReadOnlyWarehouse, ToolCall, ToolError, ToolSession, tool_definitions
+from recon.copilot.tools import ReadOnlyWarehouse, ToolCall, ToolError, ToolSession
 
 SUBMIT = "submit_diagnosis"
 EXTRA_TURNS = 4  # room for one retry and one "budget spent" turn beyond the tool budget
@@ -93,12 +94,15 @@ class RunResult:
 
 class Copilot:
     def __init__(self, client: ModelClient, warehouse: ReadOnlyWarehouse, config: AgentConfig | None = None,
-                 *, clock: Callable[[], float] = time.monotonic):
+                 *, backend: ToolBackend | None = None, clock: Callable[[], float] = time.monotonic):
         self.client = client
+        # The warehouse is still read directly for the queue row, the as-of date and the blind-mode flag;
+        # only the six tools go through the backend (whether 9c's MCP client should open it is open).
         self.warehouse = warehouse
+        self.backend = backend or InProcessBackend(warehouse)
         self.config = config or AgentConfig()
         self.clock = clock
-        self.tools = [*tool_definitions(), submit_tool_definition()]
+        self.tools = [*self.backend.list_tools(), submit_tool_definition()]
 
     def diagnose(self, exception_id: str) -> RunResult:
         row = self.warehouse.exception_row(exception_id)
@@ -110,10 +114,12 @@ class Copilot:
             hide_reason_code=self.warehouse.hide_reason_code, prompt_version=PROMPT_VERSION,
             started_at=datetime.now(timezone.utc), finished_at=datetime.now(timezone.utc))
         run.escalation_floor_active = self.config.escalation_floor and not self.warehouse.hide_reason_code
-        session = ToolSession(self.warehouse)
+        session = ToolSession(self.backend)
         run.tool_calls = session.calls
         try:
             self._loop(run, row, session)
+        except BackendUnavailable as err:  # infrastructure: a retry by the model won't fix it, so escalate
+            self._fallback(run, row, f"tool backend unavailable: {err}")
         except Exception as err:  # noqa: BLE001 - nothing the model or a tool does may crash a run
             self._fallback(run, row, f"unexpected error: {type(err).__name__}: {err}")
         run.finished_at = datetime.now(timezone.utc)

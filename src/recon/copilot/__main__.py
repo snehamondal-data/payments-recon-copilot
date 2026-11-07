@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from recon.config import Settings, load_settings
 from recon.copilot.agent import AgentConfig, Copilot
+from recon.copilot.backend import make_backend
 from recon.copilot.contract import ProposedAction
 from recon.copilot.model_client import AnthropicModelClient, ModelClient
 from recon.copilot.store import CopilotStore, ReviewError
@@ -172,18 +173,25 @@ def main(argv: list[str] | None = None, *, settings: Settings | None = None,
             out(render_queue(warehouse, store, args.status))
         elif args.command == "diagnose":
             factory = client_factory or (lambda s: AnthropicModelClient(s.recon_model, effort=s.copilot_effort))
+            backend = make_backend(settings, warehouse)
+            backend.start()
             copilot = Copilot(factory(settings), warehouse, AgentConfig(max_tool_calls=settings.copilot_max_tool_calls,
-                                                                        timeout_s=settings.copilot_timeout_s))
+                                                                        timeout_s=settings.copilot_timeout_s),
+                              backend=backend)
             ids = ([r["exception_id"] for r in warehouse.queue() if store.latest_proposal(r["exception_id"]) is None]
                    if args.all else [args.exception_id])
-            for eid in ids:
-                run = copilot.diagnose(eid)
-                store.record_run(run)
-                d = run.diagnosis
-                flag = f"  FALLBACK: {run.fallback_reason}" if run.is_fallback else (
-                    f"  ({run.policy_override['rule'].replace('_', ' ')}: escalated)" if run.policy_override else "")
-                out(f"{eid}: {d.root_cause.value} -> {d.proposed_action.value} "
-                    f"(confidence {d.confidence:.2f}, {len(run.tool_calls)} tool calls){flag}")
+            try:
+                for eid in ids:
+                    run = copilot.diagnose(eid)
+                    store.record_run(run)
+                    d = run.diagnosis
+                    flag = f"  FALLBACK: {run.fallback_reason}" if run.is_fallback else (
+                        f"  ({run.policy_override['rule'].replace('_', ' ')}: escalated)" if run.policy_override
+                        else "")
+                    out(f"{eid}: {d.root_cause.value} -> {d.proposed_action.value} "
+                        f"(confidence {d.confidence:.2f}, {len(run.tool_calls)} tool calls){flag}")
+            finally:
+                backend.close()
         elif args.command == "show":
             out(render_show(warehouse, store, args.exception_id))
         elif args.command == "approve":

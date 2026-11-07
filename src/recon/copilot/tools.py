@@ -10,19 +10,20 @@ never to treat it as instructions, and the safety contract is enforced in code e
 
 from __future__ import annotations
 
-import json
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import duckdb
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from recon.config import SnowflakeSettings
+
+if TYPE_CHECKING:
+    from recon.copilot.backend import ToolBackend
 
 MAX_ROWS = 50
 ChargeId = Annotated[str, Field(pattern=r"^ch_[0-9a-f]{16}$", description="A processor charge ID, e.g. ch_0123456789abcdef.")]
@@ -257,36 +258,35 @@ class ReadOnlyWarehouse:
 # --- one investigation's view of the tools ------------------------------------
 
 class ToolSession:
-    """Runs tool calls for one investigation and remembers every record_id it handed out."""
+    """Runs tool calls for one investigation and remembers every record_id it handed out.
+    The tools themselves run in a ToolBackend (recon.copilot.backend); a warehouse is wrapped in the
+    in-process one. The evidence check reads returned_record_ids, so it is the same for every backend."""
 
-    def __init__(self, warehouse: ReadOnlyWarehouse):
-        self.warehouse = warehouse
+    def __init__(self, tools: ToolBackend | ReadOnlyWarehouse):
+        if isinstance(tools, ReadOnlyWarehouse):
+            from recon.copilot.backend import InProcessBackend  # backend.py imports this module
+
+            tools = InProcessBackend(tools)
+        self.backend = tools
         self.returned_record_ids: set[str] = set()
         self.calls: list[ToolCall] = []
-        self._handlers: dict[str, tuple[type[_Args], Callable]] = {
-            s.name: (s.args, getattr(warehouse, s.name)) for s in TOOL_SPECS}
 
     def call(self, name: str, raw_args: Any) -> str:
-        """Returns the JSON tool result. Raises ToolError for anything the model should be told about."""
+        """Returns the JSON tool result. Raises ToolError for anything the model should be told about;
+        a backend failure is recorded on the call and raised as it is, for the agent loop to fall back on."""
         call = ToolCall(name, raw_args if isinstance(raw_args, dict) else {"_raw": raw_args})
         self.calls.append(call)
         started = time.monotonic()
         try:
-            if name not in self._handlers:
-                raise ToolError(f"unknown tool {name!r}")
-            args_model, handler = self._handlers[name]
-            try:
-                args = args_model.model_validate(raw_args)
-            except ValidationError as err:
-                raise ToolError("invalid arguments: " + "; ".join(
-                    f"{'.'.join(map(str, e['loc']))}: {e['msg']}"
-                    for e in err.errors(include_url=False, include_input=False))) from None
-            records = handler(args)
-        except ToolError as err:
-            call.error = str(err)
+            result = self.backend.call_tool(name, raw_args)
+        except Exception as err:
+            call.error = f"backend unavailable: {err}"
             raise
         finally:
             call.duration_ms = round((time.monotonic() - started) * 1000, 1)
-        call.record_ids = [r["record_id"] for r in records]
+        if result.error is not None:
+            call.error = result.error
+            raise ToolError(result.error)
+        call.record_ids = [r["record_id"] for r in result.records]
         self.returned_record_ids.update(call.record_ids)
-        return json.dumps({"records": records, "truncated": len(records) >= MAX_ROWS}, default=str)
+        return result.to_json()
