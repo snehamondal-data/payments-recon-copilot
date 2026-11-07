@@ -19,6 +19,8 @@ dependencies = [
     "snowflake-connector-python~=4.8",
     # dbt's semantic layer (Slice 8). 0.15 resolves with the pins above without moving any of them.
     "dbt-metricflow[dbt-duckdb]==0.15.0",
+    # The official MCP Python SDK (Slice 9): the read-only tools as a stdio server. Low-level Server only.
+    "mcp==2.3.0",
     "pydantic~=2.14",
     "python-dotenv~=1.2",
 ]

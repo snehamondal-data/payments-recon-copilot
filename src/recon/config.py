@@ -58,6 +58,7 @@ class Settings:
     copilot_hide_reason_code: bool = False
     copilot_effort: str = "medium"
     copilot_tool_backend: str = "inprocess"  # Slice 9: inprocess or mcp
+    mcp_access_log: Path = Path("data/mcp_access.jsonl")  # the MCP server's own record of every call
     # Semantic layer (Slice 8): written by dbt build (make recon).
     semantic_manifest_path: Path = Path("dbt/target/semantic_manifest.json")
     # Snowflake (Slice 5). The engine picks where the loader writes and where the copilot reads.
@@ -98,6 +99,7 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         copilot_hide_reason_code=_flag(env.get("COPILOT_HIDE_REASON_CODE", "false")),
         copilot_effort=env.get("COPILOT_EFFORT", "medium"),
         copilot_tool_backend=env.get("COPILOT_TOOL_BACKEND", "inprocess"),
+        mcp_access_log=Path(env.get("MCP_ACCESS_LOG", "data/mcp_access.jsonl")),
         semantic_manifest_path=Path(env.get("SEMANTIC_MANIFEST_PATH", "dbt/target/semantic_manifest.json")),
         warehouse_engine=env.get("WAREHOUSE_ENGINE", "duckdb"),
         snowflake=SnowflakeSettings(

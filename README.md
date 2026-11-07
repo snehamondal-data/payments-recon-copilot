@@ -404,6 +404,7 @@ make test                 # the 328 default tests: no Docker, no API calls, no S
 
 - **Evals:** `python -m recon.evals estimate`, then `run` (costs API money; see [Results](#copilot-evals)).
 - **Snowflake:** one-time setup in [Snowflake](#snowflake-slice-5), then `make parity` and `make test-snowflake`.
+- **MCP server:** `.venv/bin/python -m recon.mcp_server`, for an MCP client to start ([MCP server](#mcp-server-slice-9)).
 - **Airflow:** `make airflow-up`, then `make airflow-backfill` and `make airflow-report` ([airflow/README.md](airflow/README.md)).
 - **Settings:** environment variables, see [.env.example](.env.example).
 - **Operating it:** [docs/DISCOVERY.md](docs/DISCOVERY.md), [docs/ROLLOUT.md](docs/ROLLOUT.md), [docs/RUNBOOK.md](docs/RUNBOOK.md).
@@ -812,6 +813,56 @@ Figures (each one returned by query_metric):
 
 The eval scores are under [Results](#semantic-layer-eval).
 
+### MCP server (Slice 9)
+
+The copilot's six read-only tools are also an MCP server, so any MCP client (Claude Desktop, Claude
+Code, another team's agent) can use the same governed tools without database credentials or SQL
+access. The plan and its steps are in [docs/SLICE_9_SPEC.md](docs/SLICE_9_SPEC.md).
+
+- **Same tools, same code.** The server wraps the in-process tool backend, so its names, descriptions
+  and input schemas are exactly the ones the agent sends the model, and every result is the same JSON
+  text. It is built on the SDK's low-level server rather than FastMCP, because FastMCP would derive
+  the schemas from function signatures instead.
+- **stdio only.** The client starts the server as a subprocess; no network port is opened.
+- **Least privilege.** It opens the warehouse only as the agent: DuckDB read-only, or Snowflake as
+  `RECON_AGENT` with `RECON_AGENT_ROLE` and secondary roles off. It refuses to start if given the
+  loader's user, role or key, or a DuckDB file that is the ground truth (or contains its tables).
+- **Errors.** A bad argument or unknown ID is a tool error with the same message as in-process. A
+  failed backend is a tool error marked `backend_unavailable` in `_meta`, so a client can tell the
+  two apart.
+- **Access log.** Every call is appended to `MCP_ACCESS_LOG` (default `data/mcp_access.jsonl`) as one
+  JSON line: time, tool, arguments, record IDs returned, duration and error. That is a second record,
+  independent of the copilot's audit log.
+
+To connect it to Claude Desktop, add it to `claude_desktop_config.json`. Use absolute paths, because
+the client decides the working directory:
+
+```json
+{
+  "mcpServers": {
+    "recon-tools": {
+      "command": "/path/to/payments-recon-copilot/.venv/bin/python",
+      "args": ["-m", "recon.mcp_server"],
+      "env": {
+        "DUCKDB_PATH": "/path/to/payments-recon-copilot/data/warehouse.duckdb",
+        "GROUND_TRUTH_PATH": "/path/to/payments-recon-copilot/data/ground_truth.duckdb",
+        "COPILOT_DB_PATH": "/path/to/payments-recon-copilot/data/copilot.duckdb",
+        "MCP_ACCESS_LOG": "/path/to/payments-recon-copilot/data/mcp_access.jsonl"
+      }
+    }
+  }
+}
+```
+
+For Claude Code, the same thing in one command:
+
+```bash
+claude mcp add \
+  -e DUCKDB_PATH=$PWD/data/warehouse.duckdb -e GROUND_TRUTH_PATH=$PWD/data/ground_truth.duckdb \
+  -e COPILOT_DB_PATH=$PWD/data/copilot.duckdb -e MCP_ACCESS_LOG=$PWD/data/mcp_access.jsonl \
+  recon-tools -- $PWD/.venv/bin/python -m recon.mcp_server
+```
+
 ### Built in slices
 
 | Slice | What |
@@ -825,5 +876,7 @@ The eval scores are under [Results](#semantic-layer-eval).
 | 7 | This README and the FDE documents in [docs/](docs/) |
 | 8 | Semantic layer: five dbt (MetricFlow) metrics and the `ask` command |
 | after 8 | Harder cases, and the fix for charges with more than one problem (`copilot-v2`) |
+| 9a | `ToolBackend`: the agent loop gets its tools from a backend instead of the warehouse |
+| 9b | The six tools as an MCP server (stdio), with an access log and least-privilege start checks |
 
 The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).
