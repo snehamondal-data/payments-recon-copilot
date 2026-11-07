@@ -17,7 +17,8 @@ def config_name(scores: list[CaseScore]) -> str:
     if s.mode == "standard":
         guard = " + escalation floor" if s.escalation_floor else " (raw model, no floor)"
     version = "" if s.prompt_version == "copilot-v1" else f" [{s.prompt_version}]"
-    return f"{MODEL_NAMES.get(s.model, s.model)}, {s.mode}{guard}{version}"
+    via = " via MCP" if s.tool_backend == "mcp" else ""
+    return f"{MODEL_NAMES.get(s.model, s.model)}, {s.mode}{guard}{version}{via}"
 
 
 def score_table(runs: list[list[CaseScore]]) -> str:

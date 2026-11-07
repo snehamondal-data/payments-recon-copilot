@@ -150,6 +150,15 @@ class ReadOnlyWarehouse:
     def close(self) -> None:
         self.con.close()
 
+    def session_identity(self) -> dict[str, Any]:
+        """Who this connection is: for the MCP server's access log, so it records what it ran as."""
+        if self.engine == "snowflake":
+            user, role, secondary = self._query(
+                "SELECT CURRENT_USER() AS u, CURRENT_ROLE() AS r, CURRENT_SECONDARY_ROLES() AS s")[0].values()
+            return {"engine": "snowflake", "user": user, "role": role, "secondary_roles": json.loads(secondary)}
+        read_only = self._query("SELECT current_setting('access_mode') AS m")[0]["m"]
+        return {"engine": "duckdb", "access_mode": read_only, "pinned_as_of": self.as_of() if self.pinned_as_of else None}
+
     def _query(self, sql: str, params: tuple = (), limit: int | None = None) -> list[dict[str, Any]]:
         if self.engine == "duckdb":
             cur = self.con.execute(sql, params)

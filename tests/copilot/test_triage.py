@@ -139,7 +139,9 @@ def test_both_audit_trails_are_written(env):
     assert kinds.count("context_fetch") == 2 and kinds.count("diagnosis") == 2 and "tool_call" in kinds
     diagnosis = next(p for t, p in events(s) if t == "diagnosis")
     assert diagnosis["proposed_by"] == "scheduled_triage" and diagnosis["content_hash"]
-    access = [json.loads(line) for line in s.mcp_access_log.read_text().splitlines()]
+    lines = [json.loads(line) for line in s.mcp_access_log.read_text().splitlines()]
+    assert lines[0]["event"] == "server_started" and lines[0]["session"]["pinned_as_of"] == DAY.isoformat()
+    access = [a for a in lines if "tool" in a]
     # The server saw the orchestrator's row reads (all 30, to check for changes) and the model's calls.
     assert sum(1 for a in access if a["tool"] == "get_exception") >= 30 and len(access) > 30
     assert result["triaged"] == 2

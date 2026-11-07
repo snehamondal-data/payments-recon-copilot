@@ -117,8 +117,14 @@ def sql_report(scenario: str, log=print) -> dict[str, dict[str, Any]]:
     return out
 
 
-def run_hard(model: str, mode: str, scenario: str = "hard", *, client=None, log=print) -> list[dict[str, Any]]:
+def run_hard(model: str, mode: str, scenario: str = "hard", *, client=None, backend: str = "inprocess",
+             log=print) -> list[dict[str, Any]]:
+    """backend: inprocess, or mcp (Slice 9e): the agent reads only through the server, on this scenario's
+    warehouse."""
+    from recon.config import load_settings
     from recon.copilot.agent import AgentConfig, Copilot
+    from recon.copilot.backend import InProcessBackend
+    from recon.copilot.mcp_backend import McpBackend
     from recon.copilot.prompts import PROMPT_VERSION
     from recon.copilot.model_client import AnthropicModelClient
     from recon.copilot.store import CopilotStore
@@ -127,7 +133,8 @@ def run_hard(model: str, mode: str, scenario: str = "hard", *, client=None, log=
 
     p = paths(scenario)
     # One file per scenario and prompt version: a recorded run is never overwritten.
-    out_path = RESULTS_DIR / f"{scenario}__{model}__{mode}__{PROMPT_VERSION}.jsonl"
+    out_path = RESULTS_DIR / (f"{scenario}__{model}__{mode}__{PROMPT_VERSION}"
+                              + ("__mcp" if backend == "mcp" else "") + ".jsonl")
     if out_path.exists():
         raise FileExistsError(f"{out_path} exists: these are measured results; move it aside to run again")
     cases = expectations(p["ground_truth"])
@@ -140,20 +147,28 @@ def run_hard(model: str, mode: str, scenario: str = "hard", *, client=None, log=
                                   hide_reason_code=mode == "blind")
     store = CopilotStore(p["copilot"])
     client = client or AnthropicModelClient(model)
+    if backend == "mcp":
+        tools = McpBackend(load_settings({
+            "DUCKDB_PATH": str(p["warehouse"]), "GROUND_TRUTH_PATH": str(p["ground_truth"]),
+            "COPILOT_DB_PATH": str(p["copilot"]), "COPILOT_HIDE_REASON_CODE": str(mode == "blind").lower(),
+            "MCP_ACCESS_LOG": str(p["dir"] / "mcp_access.jsonl")}))
+    else:
+        tools = InProcessBackend(warehouse)
     results = []
     try:
+        tools.start()
         for c in cases:
             s = sql[c["case_id"]]
             record: dict[str, Any] = {"case_id": c["case_id"], "scenario": scenario, "model": model, "mode": mode,
-                                      "prompt_version": PROMPT_VERSION,
+                                      "prompt_version": PROMPT_VERSION, "tool_backend": backend,
                                       "expected": {k: c[k] for k in ("expected_status", "expected_reason_code",
                                                                      "should_escalate")},
                                       "sql": s, "copilot": None, "score": None}
             log(f"{c['case_id']}: SQL {s['window_status']} {s['reason_codes'] or ''} -> "
                 f"{'correct' if s['correct'] else 'MISS'}")
             for q in s["queued"]:  # the copilot only ever sees what reconciliation queued
-                run = Copilot(client, warehouse, AgentConfig(escalation_floor=mode == "standard")).diagnose(
-                    q["exception_id"])
+                run = Copilot(client, None, AgentConfig(escalation_floor=mode == "standard"),
+                              backend=tools).diagnose(q["exception_id"])
                 store.record_run(run)
                 d = run.diagnosis
                 record["copilot"] = {"exception_id": q["exception_id"], "run_id": run.run_id,
@@ -164,11 +179,14 @@ def run_hard(model: str, mode: str, scenario: str = "hard", *, client=None, log=
                     case = EvalCase(c["case_id"], c["exception_type"], RootCause(c["expected_reason_code"]),
                                     c["should_escalate"], False, q["exception_id"], tuple(c["required_record_ids"]),
                                     c["description"])
-                    record["score"] = asdict(score(case, run, model=model, mode=mode))
+                    case_score = score(case, run, model=model, mode=mode)
+                    case_score.tool_backend = backend
+                    record["score"] = asdict(case_score)
                 log(f"  copilot on {q['exception_id']}: {d.root_cause.value} -> {d.proposed_action.value} "
                     f"(escalate={d.needs_human_escalation}, confidence {d.confidence:.2f})")
             results.append(record)
     finally:
+        tools.close()
         store.close()
         warehouse.close()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

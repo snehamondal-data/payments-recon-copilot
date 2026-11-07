@@ -33,7 +33,7 @@ def test_readme_opens_with_the_one_minute_summary():
     minute = text.split("## In one minute", 1)[1].split("##", 1)[0]
     assert "All data is synthetic" in minute
     sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z*])", " ".join(minute.split()))
-    assert 5 <= len([s for s in sentences if s]) <= 7
+    assert 5 <= len([s for s in sentences if s]) <= 8
     assert "```mermaid" in text.split("## Results")[0]
 
 

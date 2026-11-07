@@ -171,7 +171,12 @@ def main(settings: Settings | None = None) -> int:
     backend = InProcessBackend(warehouse)
     try:
         backend.start()
-        anyio.run(serve, create_server(backend, AccessLog(settings.mcp_access_log)))
+        log = AccessLog(settings.mcp_access_log)
+        # First line of every session: what the server is logged in as (on Snowflake: user, role, and
+        # secondary roles, which connect() has already required to be none).
+        log.append({"timestamp": datetime.now(timezone.utc).isoformat(), "event": "server_started",
+                    "session": warehouse.session_identity()})
+        anyio.run(serve, create_server(backend, log))
     finally:
         backend.close()
         warehouse.close()

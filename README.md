@@ -15,7 +15,9 @@ alarms, and the results are identical on DuckDB and Snowflake. With the escalati
 code that forces escalation on ambiguous cases, there are 0 unsafe proposals on the 30 planted cases;
 on its own the model made 1, so that guarantee comes from the guard rail, not from the model. A harder
 test, with two problems on one payment, exposed a gap that is now fixed: across 35 planted cases
-there are 0 unsafe proposals, at the cost of 2 unnecessary escalations. **All data is synthetic**, and
+there are 0 unsafe proposals, at the cost of 2 unnecessary escalations. The copilot's read-only tools
+are also exposed as an MCP server, and an Airflow workflow triages new exceptions into a human-approval
+queue. **All data is synthetic**, and
 Kafka, Snowflake and Airflow run at project scale, not in production.
 
 ## Architecture
@@ -353,12 +355,74 @@ applied, so a second problem disappeared:
 asks for. Here the ground truth said `root_cause = ambiguous` while the prompt asked for the main problem
 plus `secondary_issues`, so a correct answer could not score as correct.
 
+### MCP parity: in-process vs the MCP server
+
+`make parity-mcp`, on the seed-42 scenario with a scripted model (no API calls), runs everything
+through both tool backends ([MCP server](#mcp-server-slice-9)):
+
+| Check | Compared | Different |
+|---|---|---|
+| Tool outputs, every tool for every exception, byte for byte | 161 | 0 |
+| `diagnose --all` audit events (apart from run IDs, timestamps, durations) | 348 per backend | 0 |
+| Diagnoses | 30 (0 fallbacks, 3 escalation-floor overrides) | 0 |
+
+The opt-in Snowflake test starts the server as a real subprocess on Snowflake: its session holds
+exactly `RECON_AGENT_ROLE` as `RECON_AGENT`, with secondary roles off (passed).
+
+### Copilot evals through MCP
+
+The 35-case eval (the 30 planted cases plus the 5 two-problem cases), Sonnet 5.5, standard mode,
+`copilot-v2`, one run each, run again with `COPILOT_TOOL_BACKEND=mcp`. Its results are in their own
+files (`...__copilot-v2__mcp.jsonl`); the in-process run is unchanged.
+
+| Tool backend | Fully correct, dev | Fully correct, held-out | Unsafe (35) | Escalations | Over-escalations | Fallbacks | Cost |
+|---|---|---|---|---|---|---|---|
+| In-process | 21/24 | 6/6 | 0 | 10 | 2 | 0 | $0.426 |
+| MCP server | 23/24 | 6/6 | 0 | 8 | 0 | 0 | $0.415 |
+
+The difference is model variance, not the transport. The tools return byte-identical output through
+both backends (above), so the model saw the same data. The two chargebacks that the in-process run
+over-escalated (it read the standard chargeback fee as a second problem) were not over-escalated this
+time; one run each can't tell that apart from chance. Both runs missed the same case,
+`11-ambiguous-2`: the model named a cause instead of `ambiguous`, and the escalation floor kept it an
+escalation. The 5 two-problem cases escalated in both.
+
+### Scheduled triage: backfill 15 to 20 Oct
+
+`recon_triage` on Snowflake in fake mode (the scripted model), triggered by each `recon_daily`
+snapshot, with the default cap of 10 per run:
+
+| As-of date | Exceptions | New that day | Triaged | Skipped (already proposed) | Left over |
+|---|---|---|---|---|---|
+| 15 Oct | 30 | 30 | 10 (9 fixes, 1 escalation) | 0 | 20 |
+| 16 Oct | 31 | 1 late settlement | 10 (the new one first) | 10 | 11 |
+| 17 Oct | 33 | 2 late settlements | 10 (the new ones first) | 20 | 3 |
+| 18 Oct | 33 | 0 | 3 | 30 | 0 |
+| 19 and 20 Oct | 33 | 0 | 0 | 33 | 0 |
+| 16 Oct, re-run | 31 | | **0** | 31 | 0 |
+
+Each late settlement was triaged on the day it became an exception. The 33 proposals left 0
+resolutions and 0 review events: only people approve. The backfill also found two bugs, both fixed:
+Airflow dropped the asset events for 19 and 20 Oct, which arrived while a triage run was already
+queued, so every run now also catches up on unfinished dates; and the cap had applied per date, so a
+run that took two dates triaged 13. One live run on Sonnet 5.5 for 20 Oct, capped at 3, proposed 3
+fixes and stopped with 30 left over, for $0.041.
+
 ## Design decisions
 
-- **Typed tools instead of SQL generation.** The agent can only call six fixed, parameterised SELECTs
-  with validated arguments, never write its own SQL. That rules out injection and runaway queries,
-  keeps it away from the ground truth and the audit log, and means every record it cites can be checked
-  against what a tool actually returned.
+- **No generated SQL: typed tools and governed metrics.** The copilot can only call six fixed,
+  parameterised SELECTs with validated arguments. That rules out injection and runaway queries, keeps
+  it away from the ground truth and the audit log, and means every record it cites can be checked
+  against what a tool returned. `ask` works the same way: it can only call `query_metric` with a
+  defined metric, dimensions and filter values from a closed set, and every number it states must
+  match a value that tool returned. The metric definitions live in dbt next to the models, so "amount
+  at risk" means one thing everywhere. The model chooses what to look at; code decides what it may say.
+- **MCP as the governance boundary.** The MCP server holds the read-only agent role, validates every
+  argument and logs every call; clients, the copilot included, get no database credentials and no SQL,
+  only the six tools. It is built on the SDK's low-level server, not FastMCP, so the tool schemas are
+  exactly the ones the in-process agent sends the model rather than regenerated from function
+  signatures. The safety rules (validation, evidence check, escalation floor, budget, audit log) stay
+  in the agent loop, so both paths enforce the same ones, and parity checks them against each other.
 - **MERGE for idempotency on Snowflake.** Snowflake does not enforce primary keys, so DuckDB's
   `ON CONFLICT DO NOTHING` has no equivalent. The loader uses `MERGE ... WHEN NOT MATCHED` keyed on
   `event_id` (or `event_id, line_no`), dedupes within each batch, and commits Kafka offsets only after
@@ -381,12 +445,6 @@ plus `secondary_issues`, so a correct answer could not score as correct.
   `DEFAULT_SECONDARY_ROLES = ('ALL')`, so a session quietly holds every role granted to the user; the
   role tests caught it, and every connection now runs `USE SECONDARY ROLES NONE` and refuses to continue
   unless it holds exactly one role.
-- **Questions go through governed metrics, not generated SQL.** `ask` can only call
-  `query_metric` with a defined metric, dimensions and filter values from a closed set. Every number it
-  states must match a value that tool returned. The metric definitions live in dbt next to the models,
-  so "amount at risk" means one thing everywhere and is tested against hand-written SQL. Generated SQL
-  could quietly define it differently in each answer, or invent a number. It is the same rule as the
-  copilot's tools: the model chooses what to look at, and code decides what it may say.
 - **Scheduling the copilot, now that it only proposes (a reversal).** Until Slice 9 the copilot was
   deliberately never scheduled: it proposed only when a person ran it. Now `recon_triage` runs it after
   each daily snapshot. That is safe because the scheduled step can only propose: it writes proposals,
@@ -409,13 +467,16 @@ Python 3.12 or newer.
 ```bash
 make venv && make up      # install, start Kafka
 make generate && make load && make recon   # scenario -> Kafka -> DuckDB -> dbt build
-make test                 # the 328 default tests: no Docker, no API calls, no Snowflake
+make test                 # the default suite: no Docker, no API calls, no Snowflake
 .venv/bin/python -m recon.copilot queue    # the exceptions queue
 .venv/bin/python -m recon.copilot diagnose charge:ch_...   # needs ANTHROPIC_API_KEY in .env
 .venv/bin/python -m recon.copilot ask "what is our match rate by currency?"
 ```
 
 - **Evals:** `python -m recon.evals estimate`, then `run` (costs API money; see [Results](#copilot-evals)).
+- **Tests:** the default suite is **389** tests (`make test`). Separately: **9** Airflow DAG tests
+  (`make airflow-test`, in the Astro container) and **37** opt-in tests: 35 on Snowflake
+  (`make test-snowflake`), 1 that needs the Kafka broker and 1 that calls the API.
 - **Snowflake:** one-time setup in [Snowflake](#snowflake-slice-5), then `make parity` and `make test-snowflake`.
 - **MCP server:** `.venv/bin/python -m recon.mcp_server`, for an MCP client to start ([MCP server](#mcp-server-slice-9)). `COPILOT_TOOL_BACKEND=mcp` makes `diagnose` use it too; `make parity-mcp` compares the two paths (no API calls).
 - **Airflow:** `make airflow-up`, then `make airflow-backfill` and `make airflow-report` ([airflow/README.md](airflow/README.md)).
@@ -702,7 +763,7 @@ audit insert ran as `RECON_LOADER_ROLE`. Ground truth stays a local DuckDB file 
 **Parity.** `make parity` runs the whole pipeline on both engines and compares them; the measured result is under [Results](#duckdb-vs-snowflake-parity).
 
 The reconciliation pytest also runs against Snowflake, with the same assertions against ground truth
-(`make test-snowflake`, 34 tests). One test is left out: the duplicate-column check exists because
+(`make test-snowflake`). One test is left out: the duplicate-column check exists because
 DuckDB silently renames a duplicate column, and Snowflake rejects one at build time instead.
 
 **Not run on Snowflake:** the evals. They cost API budget and measure the model, not the engine, and
@@ -859,9 +920,8 @@ out (`COPILOT_MCP_TIMEOUT_S`) or returns something malformed ends the run in the
 with the reason in the audit log. The validation, evidence check, escalation floor, budget and audit
 log are unchanged: they live in the agent loop, not the backend, so both paths get the same rules.
 
-`make parity-mcp` checks the two paths agree on the seed-42 scenario, with a scripted model and no
-API calls: all 161 tool outputs byte for byte, and the full `diagnose --all` flow over 30 exceptions,
-whose 318 audit events are identical apart from run IDs, timestamps and durations.
+`make parity-mcp` checks the two paths agree, with a scripted model and no API calls; the numbers are
+under [Results](#mcp-parity-in-process-vs-the-mcp-server), with the 35-case eval run through MCP.
 
 To connect it to Claude Desktop, add it to `claude_desktop_config.json`. Use absolute paths, because
 the client decides the working directory:
@@ -909,5 +969,6 @@ claude mcp add \
 | 9b | The six tools as an MCP server (stdio), with an access log and least-privilege start checks |
 | 9c | The agent uses the MCP server (`COPILOT_TOOL_BACKEND=mcp`), with a parity check against in-process |
 | 9d | `recon_triage`: scheduled triage that only proposes, capped, idempotent per exception content |
+| 9e | The 35-case eval through MCP, the Snowflake check of the server's role, and this README pass |
 
 The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).

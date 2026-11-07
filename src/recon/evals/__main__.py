@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not (args.model and args.mode):
             parser.error("hard needs --model and --mode (or --sql-only)")
-        results = run_hard(args.model, args.mode, args.scenario)
+        results = run_hard(args.model, args.mode, args.scenario, backend=settings.copilot_tool_backend)
         print(json.dumps(results, indent=2, default=str))
         return 0
 

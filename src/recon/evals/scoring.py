@@ -63,6 +63,8 @@ class CaseScore:
     # Added with copilot-v2 (secondary_issues). Every score file written before it was copilot-v1.
     prompt_version: str = "copilot-v1"
     secondary_issues: list[str] = field(default_factory=list)
+    # Added in Slice 9e: where the tools ran. Every earlier score file was in-process.
+    tool_backend: str = "inprocess"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

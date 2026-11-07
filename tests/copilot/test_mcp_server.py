@@ -195,7 +195,9 @@ def test_over_stdio_as_a_subprocess(recon_db, wh, tmp_path):
     tools, result = over_mcp(params, fn)
     assert [t.name for t in tools] == SIX
     assert result.content[0].text == InProcessBackend(wh).call_tool("get_exception", {"exception_id": eid}).to_json()
-    assert json.loads((tmp_path / "access.jsonl").read_text())["record_ids"] == [eid]
+    started, called = (json.loads(line) for line in (tmp_path / "access.jsonl").read_text().splitlines())
+    assert started["event"] == "server_started" and started["session"]["access_mode"] == "read_only"
+    assert called["record_ids"] == [eid]
 
 
 def test_the_process_exits_without_serving_when_refused(recon_db, tmp_path):
