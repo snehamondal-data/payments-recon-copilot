@@ -76,10 +76,11 @@ def dbt_summary(results: dict[str, Any]) -> dict[str, int]:
     return out
 
 
-def tool_outputs(wh: ReadOnlyWarehouse) -> dict[str, str]:
-    """Every tool the agent could call about every exception, keyed by call. Values are the JSON the model sees."""
+def tool_outputs(wh: ReadOnlyWarehouse, tools=None) -> dict[str, str]:
+    """Every tool the agent could call about every exception, keyed by call. Values are the JSON the model sees.
+    tools: a ToolBackend to call them through instead of the warehouse (the MCP parity, Slice 9c)."""
     out: dict[str, str] = {}
-    session = ToolSession(wh)
+    session = ToolSession(wh if tools is None else tools)
     calls: list[tuple[str, dict[str, Any]]] = []
     fx_days: set[str] = set()
     for row in wh.queue():

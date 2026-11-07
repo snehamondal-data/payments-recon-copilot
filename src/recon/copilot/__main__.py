@@ -173,9 +173,12 @@ def main(argv: list[str] | None = None, *, settings: Settings | None = None,
             out(render_queue(warehouse, store, args.status))
         elif args.command == "diagnose":
             factory = client_factory or (lambda s: AnthropicModelClient(s.recon_model, effort=s.copilot_effort))
+            # One tool backend for the whole command: with mcp, one server for every exception in --all.
+            # The CLI's own warehouse is for the humans' views (queue, show) and picking --all; the agent
+            # reads through the backend only.
             backend = make_backend(settings, warehouse)
             backend.start()
-            copilot = Copilot(factory(settings), warehouse, AgentConfig(max_tool_calls=settings.copilot_max_tool_calls,
+            copilot = Copilot(factory(settings), None, AgentConfig(max_tool_calls=settings.copilot_max_tool_calls,
                                                                         timeout_s=settings.copilot_timeout_s),
                               backend=backend)
             ids = ([r["exception_id"] for r in warehouse.queue() if store.latest_proposal(r["exception_id"]) is None]

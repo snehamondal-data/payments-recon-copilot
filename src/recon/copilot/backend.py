@@ -54,12 +54,22 @@ class ToolBackend(Protocol):
 
     def close(self) -> None: ...
 
+    # For the agent loop itself, never offered to the model.
+    hide_reason_code: bool
+
+    def exception_row(self, exception_id: str) -> dict[str, Any] | None:
+        """The queue row being investigated, or None if there is no such exception."""
+
+    def as_of(self) -> str:
+        """The reconciliation as-of date, for the system prompt."""
+
 
 class InProcessBackend:
     """The six tools in this process, on the read-only warehouse. Owns argument validation."""
 
     def __init__(self, warehouse: ReadOnlyWarehouse):
         self.warehouse = warehouse
+        self.hide_reason_code = warehouse.hide_reason_code
         self._handlers = {s.name: (s.args, getattr(warehouse, s.name)) for s in TOOL_SPECS}
 
     def list_tools(self) -> list[dict[str, Any]]:
@@ -89,12 +99,23 @@ class InProcessBackend:
     def close(self) -> None:
         """Nothing to stop."""
 
+    def exception_row(self, exception_id: str) -> dict[str, Any] | None:
+        return self.warehouse.exception_row(exception_id)
 
-def make_backend(settings: Settings, warehouse: ReadOnlyWarehouse) -> ToolBackend:
-    """COPILOT_TOOL_BACKEND picks where the tools run: inprocess (default) or mcp."""
+    def as_of(self) -> str:
+        return self.warehouse.as_of()
+
+
+def make_backend(settings: Settings, warehouse: ReadOnlyWarehouse | None = None) -> ToolBackend:
+    """COPILOT_TOOL_BACKEND picks where the tools run: inprocess (default, on the given warehouse) or mcp
+    (the server in a subprocess; this process opens no warehouse for the agent)."""
     kind = settings.copilot_tool_backend
     if kind == "inprocess":
+        if warehouse is None:
+            raise ValueError("the inprocess tool backend needs a warehouse")
         return InProcessBackend(warehouse)
     if kind == "mcp":
-        raise NotImplementedError("the MCP tool backend arrives in Slice 9c; use COPILOT_TOOL_BACKEND=inprocess")
+        from recon.copilot.mcp_backend import McpBackend
+
+        return McpBackend(settings)
     raise ValueError(f"COPILOT_TOOL_BACKEND must be one of {BACKENDS}, not {kind!r}")

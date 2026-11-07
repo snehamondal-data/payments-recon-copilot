@@ -93,30 +93,39 @@ class RunResult:
 
 
 class Copilot:
-    def __init__(self, client: ModelClient, warehouse: ReadOnlyWarehouse, config: AgentConfig | None = None,
+    def __init__(self, client: ModelClient, warehouse: ReadOnlyWarehouse | None, config: AgentConfig | None = None,
                  *, backend: ToolBackend | None = None, clock: Callable[[], float] = time.monotonic):
+        """Give a warehouse (tools run in process) or a backend. The queue row, the as-of date and the
+        blind-mode flag also come from the backend, so with McpBackend this process opens no warehouse."""
+        if backend is None and warehouse is None:
+            raise ValueError("Copilot needs a warehouse or a tool backend")
         self.client = client
-        # The warehouse is still read directly for the queue row, the as-of date and the blind-mode flag;
-        # only the six tools go through the backend (whether 9c's MCP client should open it is open).
-        self.warehouse = warehouse
         self.backend = backend or InProcessBackend(warehouse)
         self.config = config or AgentConfig()
         self.clock = clock
         self.tools = [*self.backend.list_tools(), submit_tool_definition()]
 
     def diagnose(self, exception_id: str) -> RunResult:
-        row = self.warehouse.exception_row(exception_id)
-        if row is None:
-            raise KeyError(f"no exception {exception_id} in the queue")
+        try:
+            row = self.backend.exception_row(exception_id)
+        except BackendUnavailable as err:
+            row, unavailable = {}, err  # the run still ends in the fallback, below, with the reason logged
+        else:
+            unavailable = None
+            if row is None:
+                raise KeyError(f"no exception {exception_id} in the queue")
+        hidden = self.backend.hide_reason_code
         run = RunResult(
             run_id=f"run_{uuid.uuid4().hex[:16]}", exception_id=exception_id, model=self.client.model,
             diagnosis=None, is_fallback=False, fallback_reason=None, policy_override=None,  # type: ignore[arg-type]
-            hide_reason_code=self.warehouse.hide_reason_code, prompt_version=PROMPT_VERSION,
+            hide_reason_code=hidden, prompt_version=PROMPT_VERSION,
             started_at=datetime.now(timezone.utc), finished_at=datetime.now(timezone.utc))
-        run.escalation_floor_active = self.config.escalation_floor and not self.warehouse.hide_reason_code
+        run.escalation_floor_active = self.config.escalation_floor and not hidden
         session = ToolSession(self.backend)
         run.tool_calls = session.calls
         try:
+            if unavailable is not None:
+                raise unavailable
             self._loop(run, row, session)
         except BackendUnavailable as err:  # infrastructure: a retry by the model won't fix it, so escalate
             self._fallback(run, row, f"tool backend unavailable: {err}")
@@ -128,7 +137,7 @@ class Copilot:
     def _loop(self, run: RunResult, row: dict[str, Any], session: ToolSession) -> None:
         cfg = self.config
         deadline = self.clock() + cfg.timeout_s
-        system = system_prompt(as_of=self.warehouse.as_of(), max_tool_calls=cfg.max_tool_calls)
+        system = system_prompt(as_of=self.backend.as_of(), max_tool_calls=cfg.max_tool_calls)
         messages: list[dict[str, Any]] = [{"role": "user", "content": first_message(run.exception_id)}]
         tool_calls_used = invalid = over_budget_turns = 0
 
@@ -189,7 +198,7 @@ class Copilot:
                         results.append(_result(block.id, str(err), error=True))
 
             if accepted is not None:
-                return self._accept(run, accepted, reason_code=row["reason_code"])
+                return self._accept(run, accepted, reason_code=row.get("reason_code"))
             if invalid > 1:
                 return self._fallback(run, row, "invalid diagnosis after one retry")
             if over_budget:
@@ -206,7 +215,7 @@ class Copilot:
         for name in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
             setattr(run, name, getattr(run, name) + (getattr(usage, name, 0) or 0))
 
-    def _accept(self, run: RunResult, d: Diagnosis, *, reason_code: str) -> None:
+    def _accept(self, run: RunResult, d: Diagnosis, *, reason_code: str | None) -> None:
         escalate = {"proposed_action": ProposedAction.ESCALATE_TO_HUMAN, "needs_human_escalation": True}
         if d.proposed_action == ProposedAction.ESCALATE_TO_HUMAN:
             run.diagnosis = d
@@ -226,11 +235,13 @@ class Copilot:
         run.diagnosis = d
 
     def _fallback(self, run: RunResult, row: dict[str, Any], reason: str) -> None:
-        """Deterministic: the reconciliation reason code, escalated, with zero confidence."""
+        """Deterministic: the reconciliation reason code, escalated, with zero confidence. If this process
+        doesn't know the reason code (blind mode over MCP, or the backend was down before the row arrived),
+        the root cause is ambiguous: it is escalated either way."""
         run.is_fallback = True
         run.fallback_reason = reason
         run.diagnosis = Diagnosis(
-            root_cause=RootCause(row["reason_code"]),
+            root_cause=RootCause(row.get("reason_code") or RootCause.AMBIGUOUS),
             evidence=[run.exception_id],
             proposed_action=ProposedAction.ESCALATE_TO_HUMAN,
             confidence=0.0,

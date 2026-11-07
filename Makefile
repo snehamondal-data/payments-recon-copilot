@@ -3,7 +3,7 @@ PY ?= .venv/bin/python
 -include .env
 export
 
-.PHONY: venv up down generate load replay recon recon-hard recon-snowflake parity test test-integration test-live test-snowflake eval-estimate eval-report airflow-up airflow-down airflow-test airflow-backfill airflow-report
+.PHONY: venv up down generate load replay recon recon-hard recon-snowflake parity parity-mcp test test-integration test-live test-snowflake eval-estimate eval-report airflow-up airflow-down airflow-test airflow-backfill airflow-report
 
 venv:
 	python3 -m venv .venv
@@ -43,6 +43,9 @@ recon-snowflake:
 # The whole pipeline on both engines from fresh Kafka topics, then compare. Needs `make up`.
 parity:
 	$(PY) -m recon.parity
+
+parity-mcp:   # in-process vs MCP tool backend: tool outputs and the full diagnose --all flow, no API calls
+	$(PY) -m recon.mcp_parity
 
 test:
 	$(PY) -m pytest

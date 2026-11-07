@@ -37,6 +37,8 @@ MCP (Model Context Protocol) is a standard way to expose tools to any AI client.
 
 **As built (9a):** the backend sits underneath `ToolSession`, which still tracks calls and returned record IDs, so the evidence check is the same for every backend. `InProcessBackend` owns argument validation. A tool error comes back as data; a backend failure raises `BackendUnavailable`, is recorded on the tool call, and ends the run in the escalate fallback. `Copilot` still reads the warehouse directly for the queue row, the as-of date and the blind-mode flag. **Open for 9c:** should the MCP client open the warehouse at all, or should those three lookups also come from the server?
 
+**Decided in 9c:** it opens none. The queue row comes from `get_exception` over MCP (an orchestrator call, outside the model's budget and its audit trail), the as-of date from an MCP resource, `recon://as-of`, and the blind-mode flag from the client's own settings, with the hiding done by the server. One consequence: in blind mode over MCP the client never learns the reason code, so a fallback diagnosis says `ambiguous` (escalated either way) instead of the reconciliation reason code.
+
 ---
 
 ## 3. 9b: the MCP server

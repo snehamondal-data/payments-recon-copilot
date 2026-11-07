@@ -37,6 +37,8 @@ TOOL_ERROR, BACKEND_UNAVAILABLE = "tool_error", "backend_unavailable"
 # Tables only the ground-truth file has: a warehouse that contains them holds the answers.
 GROUND_TRUTH_TABLES = ("planted_cases", "hard_expectations", "expected_dlq", "generator_run")
 LOADER_NAMES = ("RECON_LOADER", "RECON_LOADER_ROLE")
+# For the orchestrating client, not the model: a resource, so it never appears in the tool list.
+AS_OF_URI = "recon://as-of"
 
 INSTRUCTIONS = """Read-only tools over Tallyline's synthetic payments reconciliation warehouse: the exception
 queue, processor events, bank settlement lines, ledger journals, refunds and FX rates. Every record carries a
@@ -130,7 +132,19 @@ def create_server(backend: ToolBackend, access_log: AccessLog) -> Server:
                            "error": error, "error_kind": kind})
         return response
 
-    return Server(SERVER_NAME, instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool)
+    async def list_resources(ctx, params) -> types.ListResourcesResult:
+        return types.ListResourcesResult(resources=[types.Resource(
+            uri=AS_OF_URI, name="as-of", mime_type="text/plain",
+            description="The reconciliation as-of date (ISO), which the copilot's system prompt states.")])
+
+    async def read_resource(ctx, params: types.ReadResourceRequestParams) -> types.ReadResourceResult:
+        if params.uri != AS_OF_URI:
+            raise ValueError(f"unknown resource {params.uri}")
+        return types.ReadResourceResult(contents=[types.TextResourceContents(
+            uri=AS_OF_URI, mime_type="text/plain", text=str(backend.as_of()))])
+
+    return Server(SERVER_NAME, instructions=INSTRUCTIONS, on_list_tools=list_tools, on_call_tool=call_tool,
+                  on_list_resources=list_resources, on_read_resource=read_resource)
 
 
 def _error(message: str, kind: str) -> types.CallToolResult:

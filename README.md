@@ -404,7 +404,7 @@ make test                 # the 328 default tests: no Docker, no API calls, no S
 
 - **Evals:** `python -m recon.evals estimate`, then `run` (costs API money; see [Results](#copilot-evals)).
 - **Snowflake:** one-time setup in [Snowflake](#snowflake-slice-5), then `make parity` and `make test-snowflake`.
-- **MCP server:** `.venv/bin/python -m recon.mcp_server`, for an MCP client to start ([MCP server](#mcp-server-slice-9)).
+- **MCP server:** `.venv/bin/python -m recon.mcp_server`, for an MCP client to start ([MCP server](#mcp-server-slice-9)). `COPILOT_TOOL_BACKEND=mcp` makes `diagnose` use it too; `make parity-mcp` compares the two paths (no API calls).
 - **Airflow:** `make airflow-up`, then `make airflow-backfill` and `make airflow-report` ([airflow/README.md](airflow/README.md)).
 - **Settings:** environment variables, see [.env.example](.env.example).
 - **Operating it:** [docs/DISCOVERY.md](docs/DISCOVERY.md), [docs/ROLLOUT.md](docs/ROLLOUT.md), [docs/RUNBOOK.md](docs/RUNBOOK.md).
@@ -834,6 +834,19 @@ access. The plan and its steps are in [docs/SLICE_9_SPEC.md](docs/SLICE_9_SPEC.m
   JSON line: time, tool, arguments, record IDs returned, duration and error. That is a second record,
   independent of the copilot's audit log.
 
+The copilot can use the server too (`COPILOT_TOOL_BACKEND=mcp`). `diagnose` then starts one server
+for the whole command and the agent's process opens no warehouse: the exception row comes from
+`get_exception` over MCP (an orchestrator call, outside the model's tool budget) and the as-of date
+from an MCP resource, `recon://as-of`, which the model never sees. Blind mode is enforced by the
+server alone. A tool error goes back to the model to retry; a server that won't start, exits, times
+out (`COPILOT_MCP_TIMEOUT_S`) or returns something malformed ends the run in the escalate fallback,
+with the reason in the audit log. The validation, evidence check, escalation floor, budget and audit
+log are unchanged: they live in the agent loop, not the backend, so both paths get the same rules.
+
+`make parity-mcp` checks the two paths agree on the seed-42 scenario, with a scripted model and no
+API calls: all 161 tool outputs byte for byte, and the full `diagnose --all` flow over 30 exceptions,
+whose 318 audit events are identical apart from run IDs, timestamps and durations.
+
 To connect it to Claude Desktop, add it to `claude_desktop_config.json`. Use absolute paths, because
 the client decides the working directory:
 
@@ -878,5 +891,6 @@ claude mcp add \
 | after 8 | Harder cases, and the fix for charges with more than one problem (`copilot-v2`) |
 | 9a | `ToolBackend`: the agent loop gets its tools from a backend instead of the warehouse |
 | 9b | The six tools as an MCP server (stdio), with an access log and least-privilege start checks |
+| 9c | The agent uses the MCP server (`COPILOT_TOOL_BACKEND=mcp`), with a parity check against in-process |
 
 The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).

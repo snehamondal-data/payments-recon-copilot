@@ -10,6 +10,7 @@ from recon.config import load_settings
 from recon.copilot.agent import Copilot
 from recon.copilot.backend import BackendUnavailable, InProcessBackend, ToolResult, make_backend
 from recon.copilot.contract import ProposedAction
+from recon.copilot.mcp_backend import McpBackend
 from recon.copilot.store import CopilotStore
 from recon.copilot.tools import TOOL_SPECS, ToolSession, tool_definitions
 
@@ -110,7 +111,6 @@ def test_a_dead_backend_falls_back_and_the_call_is_logged_with_its_error(wh, cas
 def test_make_backend_reads_copilot_tool_backend(wh):
     assert load_settings({}).copilot_tool_backend == "inprocess"
     assert isinstance(make_backend(load_settings({}), wh), InProcessBackend)
-    with pytest.raises(NotImplementedError, match="9c"):
-        make_backend(load_settings({"COPILOT_TOOL_BACKEND": "mcp"}), wh)
+    assert isinstance(make_backend(load_settings({"COPILOT_TOOL_BACKEND": "mcp"})), McpBackend)  # 9c; not started
     with pytest.raises(ValueError, match="COPILOT_TOOL_BACKEND"):
         make_backend(load_settings({"COPILOT_TOOL_BACKEND": "grpc"}), wh)
