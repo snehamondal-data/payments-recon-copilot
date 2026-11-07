@@ -10,10 +10,10 @@ never to treat it as instructions, and the safety contract is enforced in code e
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -21,6 +21,7 @@ import duckdb
 from pydantic import BaseModel, ConfigDict, Field
 
 from recon.config import SnowflakeSettings
+from recon.warehouse.values import json_value
 
 if TYPE_CHECKING:
     from recon.copilot.backend import ToolBackend
@@ -103,16 +104,8 @@ def tool_definitions() -> list[dict[str, Any]]:
 
 # --- the warehouse -------------------------------------------------------------
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, datetime):
-        # Always UTC, never the machine's local zone: the T+2 rule runs on the charge's UTC date.
-        # (The ledger's local calendar date is still there, as posting_date.)
-        return (value.astimezone(timezone.utc) if value.tzinfo else value).isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return str(value)
-    return value
+_jsonable = json_value  # UTC ISO timestamps, ISO dates, decimals as strings
+EXCEPTIONS_DAILY = "marts.recon_exceptions_daily"  # each as-of date's exception rows (recon.orchestration)
 
 
 @dataclass
@@ -127,7 +120,11 @@ class ToolCall:
 class ReadOnlyWarehouse:
     """The only way the copilot reads data. Opens the warehouse read-only and nothing else."""
 
-    def __init__(self, path: Path, *, forbidden_paths: tuple[Path, ...] = (), hide_reason_code: bool = False):
+    def __init__(self, path: Path, *, forbidden_paths: tuple[Path, ...] = (), hide_reason_code: bool = False,
+                 as_of: date | None = None):
+        """as_of pins the exception queue to one date's snapshot (marts.recon_exceptions_daily) instead of the
+        live marts, which hold only the last date built. Scheduled triage uses it; the tools over raw data
+        are the same either way."""
         path = Path(path)
         for forbidden in forbidden_paths:
             if path.resolve() == Path(forbidden).resolve():
@@ -135,9 +132,11 @@ class ReadOnlyWarehouse:
         self.con = open_read_only(path)
         self.hide_reason_code = hide_reason_code
         self.engine = "duckdb"
+        self.pinned_as_of = None if as_of is None else date.fromisoformat(str(as_of))
 
     @classmethod
-    def snowflake(cls, sf: SnowflakeSettings, *, hide_reason_code: bool = False) -> ReadOnlyWarehouse:
+    def snowflake(cls, sf: SnowflakeSettings, *, hide_reason_code: bool = False,
+                  as_of: date | None = None) -> ReadOnlyWarehouse:
         """Logs in as the agent user, never the loader: connect() refuses a session without RECON_AGENT_ROLE."""
         from recon.warehouse.snowflake_client import connect
 
@@ -145,6 +144,7 @@ class ReadOnlyWarehouse:
         self.con = connect(sf, sf.agent)
         self.hide_reason_code = hide_reason_code
         self.engine = "snowflake"
+        self.pinned_as_of = None if as_of is None else date.fromisoformat(str(as_of))
         return self
 
     def close(self) -> None:
@@ -171,13 +171,23 @@ class ReadOnlyWarehouse:
     # Internal lookups for the agent loop and the CLI. Never exposed to the model.
 
     def exception_row(self, exception_id: str) -> dict[str, Any] | None:
+        if self.pinned_as_of is not None:
+            rows = self._rows(f"SELECT row_json FROM {EXCEPTIONS_DAILY} WHERE as_of_date = ? AND exception_id = ?",
+                              (self.pinned_as_of, exception_id))
+            return json.loads(rows[0]["row_json"]) if rows else None
         rows = self._rows("SELECT * FROM marts.recon_exceptions WHERE exception_id = ?", (exception_id,))
         return rows[0] if rows else None
 
     def queue(self) -> list[dict[str, Any]]:
+        if self.pinned_as_of is not None:
+            rows = [json.loads(r["row_json"]) for r in self._query(
+                f"SELECT row_json FROM {EXCEPTIONS_DAILY} WHERE as_of_date = ?", (self.pinned_as_of,))]
+            return sorted(rows, key=lambda r: (r["item_date"], r["exception_id"]))
         return self._query("SELECT * FROM marts.recon_exceptions ORDER BY item_date, exception_id")
 
     def as_of(self) -> str:
+        if self.pinned_as_of is not None:
+            return self.pinned_as_of.isoformat()
         return self._query("SELECT max(as_of_date) AS as_of FROM marts.recon_exceptions")[0]["as_of"]
 
     # The six tools.

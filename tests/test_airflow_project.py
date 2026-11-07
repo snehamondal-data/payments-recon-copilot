@@ -35,3 +35,16 @@ def test_the_snowflake_write_pool_has_one_slot_and_settings_hold_no_credentials(
     settings = (AIRFLOW / "airflow_settings.yaml").read_text()
     assert "pool_name: recon_snowflake_writes\n      pool_slot: 1" in settings
     assert not re.search(r"conn_(password|extra|login):[ \t]*\S", settings)
+
+
+def test_the_image_pins_the_same_mcp_sdk_as_the_repo():
+    pin = re.search(r'"(mcp==[\d.]+)"', (AIRFLOW.parent / "pyproject.toml").read_text()).group(1)
+    assert pin in (AIRFLOW / "requirements.txt").read_text().split()
+
+
+def test_triage_only_proposes_and_defaults_to_the_scripted_model():
+    dag = (AIRFLOW / "dags" / "recon_triage.py").read_text()
+    code = dag.split('"""', 2)[2]
+    assert "schedule=[SNAPSHOT]" in code and 'Asset("recon_daily_snapshot")' in code
+    assert not any(word in code for word in ("approve", "resolve", "reject"))
+    assert 'outlets=[SNAPSHOT]' in (AIRFLOW / "dags" / "recon_daily.py").read_text()

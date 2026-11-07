@@ -21,6 +21,8 @@ services:
       FX_RATES_PATH: /opt/recon/data/ref/fx_rates.csv
       SNOWFLAKE_LOADER_KEY_PATH: /opt/recon/secrets/recon_loader_rsa_key.p8
       SNOWFLAKE_AGENT_KEY_PATH: /opt/recon/secrets/recon_agent_rsa_key.p8
+      # recon_triage starts the MCP server as a subprocess here; it logs in as RECON_AGENT only
+      MCP_ACCESS_LOG: /tmp/recon_mcp/mcp_access.jsonl
     networks:
       - airflow
       - recon_kafka

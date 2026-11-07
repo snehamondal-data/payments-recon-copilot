@@ -6,3 +6,5 @@ duckdb>=1.4,<1.5
 pydantic~=2.14
 python-dotenv~=1.2
 anthropic~=2.4
+# Slice 9d: recon_triage's agent talks to the MCP server (python -m recon.mcp_server) over stdio
+mcp==2.3.0

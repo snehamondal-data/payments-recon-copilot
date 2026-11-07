@@ -52,7 +52,7 @@ flowchart LR
 - **Audit log:** every tool call, model output, policy override and review decision, append-only.
 - **Semantic layer:** five governed metrics defined in dbt (MetricFlow) on top of the marts, compiled to SQL by MetricFlow and run read-only.
 - **`ask` command:** answers plain-English questions about the whole picture by calling only `query_metric`; every number it states must match a query result.
-- **Airflow:** runs the daily load, dbt build and pending-settlement re-check on Snowflake; the copilot is not scheduled.
+- **Airflow:** runs the daily load, dbt build and pending-settlement re-check on Snowflake, then `recon_triage`, which has the copilot propose (never approve) for each new exception.
 - **Ground truth and evals:** the planted answers live in a separate file that only the evals read, never the loader, dbt or the agent.
 
 ## Results
@@ -374,19 +374,32 @@ plus `secondary_issues`, so a correct answer could not score as correct.
   task snapshots its date straight after building, and later tasks read only that snapshot, so any
   task can be re-run for any date, in any order. The backfill exposed the need: a scheduled run and a
   backfill have separate concurrency limits.
-- **Least-privilege roles.** The agent's Snowflake role can SELECT the raw, reference and mart schemas
-  and nothing else: no writes, and no access at all to the copilot schema. The audit log and
-  resolutions are written by the loader role. Both users are key-pair service users with no password,
-  and tests probe every kind of write.
+- **Least-privilege roles, secondary roles off.** The agent's Snowflake role can SELECT the raw,
+  reference and mart schemas and nothing else: no writes, and no access at all to the copilot schema.
+  The audit log and resolutions are written by the loader role. Both users are key-pair service users
+  with no password, and tests probe every kind of write. New Snowflake users default to
+  `DEFAULT_SECONDARY_ROLES = ('ALL')`, so a session quietly holds every role granted to the user; the
+  role tests caught it, and every connection now runs `USE SECONDARY ROLES NONE` and refuses to continue
+  unless it holds exactly one role.
 - **Questions go through governed metrics, not generated SQL.** `ask` can only call
   `query_metric` with a defined metric, dimensions and filter values from a closed set. Every number it
   states must match a value that tool returned. The metric definitions live in dbt next to the models,
   so "amount at risk" means one thing everywhere and is tested against hand-written SQL. Generated SQL
   could quietly define it differently in each answer, or invent a number. It is the same rule as the
   copilot's tools: the model chooses what to look at, and code decides what it may say.
-- **Secondary roles off.** New Snowflake users default to `DEFAULT_SECONDARY_ROLES = ('ALL')`, so a
-  session quietly holds every role granted to the user. The role tests caught it; every connection now
-  runs `USE SECONDARY ROLES NONE` and refuses to continue unless it holds exactly one role.
+- **Scheduling the copilot, now that it only proposes (a reversal).** Until Slice 9 the copilot was
+  deliberately never scheduled: it proposed only when a person ran it. Now `recon_triage` runs it after
+  each daily snapshot. That is safe because the scheduled step can only propose: it writes proposals,
+  marked `proposed_by = scheduled_triage` with the DAG run ID, and never approves, rejects or applies
+  anything (a test checks it writes no resolutions and no review events). Approval stays human. The AI
+  reads data only through the MCP server, under a read-only role; the triage orchestrator uses the loader
+  role only to list the date's exceptions and write proposals. Every call is audited, each run stops at
+  `TRIAGE_MAX_EXCEPTIONS` and `TRIAGE_MAX_COST_USD`, re-running a date proposes nothing new, and if the
+  model or the server fails, the case escalates to a person. So automating triage speeds up the queue
+  without taking the human out of the loop. Known limitation: the MCP server runs in the Airflow
+  scheduler container, where both Snowflake keys are mounted. Its startup checks limit it to
+  `RECON_AGENT`; full isolation (its own container with only the agent key, over authenticated HTTP) is
+  the next step.
 
 ## How to run it
 
@@ -731,9 +744,12 @@ one-slot pool (`recon_snowflake_writes`). That matters because Airflow counts th
 scheduled run and a backfill separately, so they could otherwise interleave a build with another
 date's snapshot.
 
-The copilot is never scheduled: it proposes only when a human runs it. The one scheduled thing that
-would call the API is `recon_nightly_evals`, which runs the eval harness (and so the copilot) if someone
-unpauses it.
+Until Slice 9 the copilot was never scheduled. Now **`recon_triage`** (Slice 9d) runs after each
+`recon_daily` snapshot, through the `recon_daily_snapshot` asset: for that date it has the copilot propose
+a diagnosis for each exception that doesn't have one yet, through the MCP server, and stops at a cap.
+It only proposes; a human still approves. Its default model is a scripted stand-in
+(`TRIAGE_MODEL_MODE=fake`), so it costs nothing until someone sets `live`. The other scheduled thing that
+would call the API is `recon_nightly_evals`, which runs the eval harness if someone unpauses it.
 
 **`recon_nightly_evals`** is paused by default, because every run calls the Claude API. It builds a
 private DuckDB copy inside the task and runs the Slice 4 harness, with a budget cap. It was not run in
@@ -892,5 +908,6 @@ claude mcp add \
 | 9a | `ToolBackend`: the agent loop gets its tools from a backend instead of the warehouse |
 | 9b | The six tools as an MCP server (stdio), with an access log and least-privilege start checks |
 | 9c | The agent uses the MCP server (`COPILOT_TOOL_BACKEND=mcp`), with a parity check against in-process |
+| 9d | `recon_triage`: scheduled triage that only proposes, capped, idempotent per exception content |
 
 The full plan is in [docs/PROJECT_SPEC.md](docs/PROJECT_SPEC.md).

@@ -11,10 +11,10 @@ import duckdb
 class DuckDBClient:
     dialect = "duckdb"
 
-    def __init__(self, path: str | Path = ":memory:"):
-        if str(path) != ":memory:":
+    def __init__(self, path: str | Path = ":memory:", *, read_only: bool = False):
+        if str(path) != ":memory:" and not read_only:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._con = duckdb.connect(str(path))
+        self._con = duckdb.connect(str(path), read_only=read_only)
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> list[tuple]:
         result = self._con.execute(sql, params)

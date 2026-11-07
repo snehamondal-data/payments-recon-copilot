@@ -58,7 +58,7 @@ AUDIT_COLUMNS = ("audit_id", "exception_id", "run_id", "event_type", "model", "p
 RESOLUTION_COLUMNS = ("resolution_id", "exception_id", "run_id", "source", "root_cause", "action", "amount_minor",
                       "record_ids", "decided_by", "reason", "applied_at")
 
-EVENT_TYPES = ("run_started", "tool_call", "model_output", "validation_failed", "policy_override", "diagnosis",
+EVENT_TYPES = ("run_started", "context_fetch", "tool_call", "model_output", "validation_failed", "policy_override", "diagnosis",
                "review", "resolution_applied")
 
 
@@ -78,6 +78,8 @@ class Proposal:
     created_at: datetime
     status: str  # proposed | approved | rejected | resolved
     review: dict[str, Any] | None
+    proposed_by: str = "manual"  # or scheduled_triage (Slice 9d); older proposals predate the field
+    dag_run_id: str | None = None
 
 
 def _now() -> datetime:
@@ -120,6 +122,8 @@ class CopilotStore:
             self._append(eid, "run_started", {"hide_reason_code": run.hide_reason_code,
                                               "escalation_floor": run.escalation_floor_active,
                                               "started_at": run.started_at}, at=run.started_at, **meta)
+            if run.context_fetch is not None:
+                self._append(eid, "context_fetch", run.context_fetch, **meta)
             for seq, call in enumerate(run.tool_calls, start=1):
                 self._append(eid, "tool_call", {"seq": seq, "tool": call.name, "arguments": call.arguments,
                                                 "returned_record_ids": call.record_ids, "error": call.error,
@@ -142,6 +146,9 @@ class CopilotStore:
                 "cache_read_input_tokens": run.cache_read_input_tokens,
                 "latency_s": run.latency_s,
                 "finished_at": run.finished_at,
+                "content_hash": run.content_hash,
+                "proposed_by": run.proposed_by,
+                "dag_run_id": run.dag_run_id,
             }, at=run.finished_at, **meta)
 
     def approve(self, exception_id: str, *, reviewer: str, reason: str, amount_minor: int | None) -> str:
@@ -220,7 +227,22 @@ class CopilotStore:
         review = json.loads(review_rows[0][0]) if review_rows else None
         status = "proposed" if review is None else review["decision"]
         return Proposal(run_id, exception_id, model, payload["diagnosis"], payload["is_fallback"],
-                        payload["fallback_reason"], payload["policy_override"], created_at, status, review)
+                        payload["fallback_reason"], payload["policy_override"], created_at, status, review,
+                        payload.get("proposed_by") or "manual", payload.get("dag_run_id"))
+
+    def proposal_keys(self, *, prompt_version: str, model: str) -> set[tuple[str, str]]:
+        """(exception_id, content_hash) of every diagnosis this prompt version and model already made,
+        whoever ran it. Scheduled triage skips those: re-running a date proposes nothing new. Fallbacks
+        are left out: they record an infrastructure failure, not a diagnosis, so they are tried again."""
+        rows = self.db.execute("SELECT exception_id, payload FROM audit_log WHERE event_type = 'diagnosis' "
+                               "AND prompt_version = ? AND model = ?", (prompt_version, model))
+        keys = set()
+        for exception_id, payload in rows:
+            payload = json.loads(payload)
+            content = payload.get("content_hash")
+            if content and not payload["is_fallback"]:
+                keys.add((exception_id, content))
+        return keys
 
     def log(self) -> list[tuple]:
         """Every event, oldest first: (exception_id, run_id, event_type, payload JSON text, created_at)."""

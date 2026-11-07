@@ -198,9 +198,9 @@ Then find what changed on the day the numbers moved:
    why.
 3. **If it's a new pattern,** add planted cases for it to the **dev** set, improve the prompt or add a
    rule against dev only, and confirm on a newly generated held-out set.
-4. **Until it's fixed,** stop running `diagnose`. The copilot is never scheduled, so not running it
-   is the off switch. Reviewers work the queue by hand with `show` and `resolve`. Nothing else depends
-   on the copilot.
+4. **Until it's fixed,** stop running `diagnose`, and pause `recon_triage` (or set
+   `TRIAGE_MODEL_MODE=fake`), the one scheduled thing that runs the copilot. That is the off switch.
+   Reviewers work the queue by hand with `show` and `resolve`. Nothing else depends on the copilot.
 
 ---
 

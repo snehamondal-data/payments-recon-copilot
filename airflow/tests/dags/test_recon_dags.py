@@ -15,7 +15,7 @@ def dagbag():
 
 def test_no_import_errors(dagbag):
     assert dagbag.import_errors == {}
-    assert set(dagbag.dag_ids) == {"recon_daily", "recon_nightly_evals"}
+    assert set(dagbag.dag_ids) == {"recon_daily", "recon_nightly_evals", "recon_triage"}
 
 
 def test_recon_daily_order(dagbag):
@@ -52,3 +52,21 @@ def test_dag_files_import_nothing_from_recon_at_parse_time():
     for path in DAGS_DIR.glob("*.py"):
         top_level = [line for line in path.read_text().splitlines() if line.startswith(("import ", "from "))]
         assert not any("recon" in line for line in top_level), path
+
+
+def test_recon_triage_runs_on_the_daily_snapshot_asset(dagbag):
+    dag = dagbag.dags["recon_triage"]
+    daily = dagbag.dags["recon_daily"]
+    [outlet] = daily.get_task("dbt_build").outlets
+    assert outlet.name == "recon_daily_snapshot"
+    assert [a.name for a in dag.timetable.asset_condition.objects] == ["recon_daily_snapshot"]
+    order = {t.task_id: sorted(t.downstream_task_ids) for t in dag.tasks}
+    assert order == {"triage": ["summary"], "summary": []}
+    assert dag.max_active_runs == 1 and dag.catchup is False
+
+
+def test_recon_triage_defaults_to_the_scripted_model_and_never_reviews():
+    source = (DAGS_DIR / "recon_triage.py").read_text()
+    code = source.split('"""', 2)[2]
+    assert "approve" not in code and "resolve" not in code
+    assert "TRIAGE_MODEL_MODE=fake` (the default)" in source

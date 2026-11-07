@@ -44,7 +44,8 @@ def server_env(settings: Settings) -> dict[str, str]:
     env = {"WAREHOUSE_ENGINE": settings.warehouse_engine, "DUCKDB_PATH": str(settings.duckdb_path.resolve()),
            "COPILOT_DB_PATH": str(settings.copilot_db_path.resolve()),
            "COPILOT_HIDE_REASON_CODE": "true" if settings.copilot_hide_reason_code else "false",
-           "MCP_ACCESS_LOG": str(settings.mcp_access_log.resolve())}
+           "MCP_ACCESS_LOG": str(settings.mcp_access_log.resolve()),
+           "COPILOT_AS_OF": settings.copilot_as_of.isoformat() if settings.copilot_as_of else ""}
     if (sf := settings.snowflake) is not None:
         env |= {"SNOWFLAKE_ACCOUNT": sf.account, "SNOWFLAKE_WAREHOUSE": sf.warehouse,
                 "SNOWFLAKE_DATABASE": sf.database,

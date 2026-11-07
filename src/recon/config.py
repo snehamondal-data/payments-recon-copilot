@@ -60,6 +60,12 @@ class Settings:
     copilot_tool_backend: str = "inprocess"  # Slice 9: inprocess or mcp
     mcp_access_log: Path = Path("data/mcp_access.jsonl")  # the MCP server's own record of every call
     copilot_mcp_timeout_s: float = 30.0  # per MCP call, and for the server to start
+    # Pin the exception queue to one as-of date's snapshot (scheduled triage); None reads the live marts.
+    copilot_as_of: date | None = None
+    # Scheduled triage (Slice 9d)
+    triage_max_exceptions: int = 10
+    triage_max_cost_usd: float = 0.50
+    triage_model_mode: str = "fake"  # fake (scripted, no API calls) | live
     # Semantic layer (Slice 8): written by dbt build (make recon).
     semantic_manifest_path: Path = Path("dbt/target/semantic_manifest.json")
     # Snowflake (Slice 5). The engine picks where the loader writes and where the copilot reads.
@@ -102,6 +108,10 @@ def load_settings(env: Mapping[str, str] = os.environ) -> Settings:
         copilot_tool_backend=env.get("COPILOT_TOOL_BACKEND", "inprocess"),
         mcp_access_log=Path(env.get("MCP_ACCESS_LOG", "data/mcp_access.jsonl")),
         copilot_mcp_timeout_s=float(env.get("COPILOT_MCP_TIMEOUT_S", "30")),
+        copilot_as_of=date.fromisoformat(env["COPILOT_AS_OF"]) if env.get("COPILOT_AS_OF") else None,
+        triage_max_exceptions=int(env.get("TRIAGE_MAX_EXCEPTIONS", "10")),
+        triage_max_cost_usd=float(env.get("TRIAGE_MAX_COST_USD", "0.50")),
+        triage_model_mode=env.get("TRIAGE_MODEL_MODE", "fake"),
         semantic_manifest_path=Path(env.get("SEMANTIC_MANIFEST_PATH", "dbt/target/semantic_manifest.json")),
         warehouse_engine=env.get("WAREHOUSE_ENGINE", "duckdb"),
         snowflake=SnowflakeSettings(

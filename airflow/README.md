@@ -6,9 +6,12 @@ one local Airflow, one local Kafka broker, one Snowflake trial account. All data
 | DAG | What | Default |
 |---|---|---|
 | `recon_daily` | Kafka -> Snowflake load, `dbt build` with as-of = logical date, re-check pending settlements, log a summary | paused (Airflow's default); run it by backfill or unpause |
+| `recon_triage` | On each `recon_daily_snapshot` asset event: the copilot proposes (never approves) for that date's new exceptions, through the MCP server, up to the caps | paused (Airflow's default); `TRIAGE_MODEL_MODE=fake` (scripted, no API calls) unless set to `live` |
 | `recon_nightly_evals` | The Slice 4 evals on a private DuckDB copy | **paused**: each run calls the Claude API and costs money |
 
-The copilot is in neither DAG. It proposes only when a human runs `python -m recon.copilot`.
+The copilot runs only in `recon_triage`, and there it only proposes: approving, rejecting and resolving
+stay with a human (`python -m recon.copilot queue`, `show`, `approve`). The MCP server it uses runs in the
+scheduler container and logs in as `RECON_AGENT` only; its access log is `/tmp/recon_mcp/mcp_access.jsonl`.
 
 ## Run it
 

@@ -119,14 +119,18 @@ def test_the_audit_log_has_every_step(cli, fee_script):
     cli("approve", case.exception_id, "--reason", "ok", "--reviewer", "sneha")
     events = audit(cli.copilot_db)
     types = [e["event_type"] for e in events]
-    assert types == ["run_started", "tool_call", "tool_call", "tool_call", "model_output", "model_output",
-                     "model_output", "model_output", "diagnosis", "review", "resolution_applied"]
+    assert types == ["run_started", "context_fetch", "tool_call", "tool_call", "tool_call", "model_output",
+                     "model_output", "model_output", "model_output", "diagnosis", "review", "resolution_applied"]
+    # The orchestrator's own read of the row (Slice 9d): audited, but not one of the model's three tool calls.
+    fetch = json.loads(events[1]["payload"])
+    assert fetch == {"tool": "get_exception", "arguments": {"exception_id": case.exception_id},
+                     "returned_record_ids": [case.exception_id]}
     tool_calls = [json.loads(e["payload"]) for e in events if e["event_type"] == "tool_call"]
     assert tool_calls[0]["arguments"] == {"exception_id": case.exception_id}
     assert all(c["returned_record_ids"] for c in tool_calls)
     diagnosis = json.loads(next(e["payload"] for e in events if e["event_type"] == "diagnosis"))
     assert diagnosis["diagnosis"]["root_cause"] == "fee_mismatch" and diagnosis["is_fallback"] is False
-    assert json.loads(events[4]["payload"])["raw"]["content"]  # the raw model output is kept
+    assert json.loads(events[5]["payload"])["raw"]["content"]  # the raw model output is kept
     review = json.loads(next(e["payload"] for e in events if e["event_type"] == "review"))
     assert review == {"decision": "approved", "reviewer": "sneha", "reason": "ok",
                       "action": "raise_fee_claim_with_processor", "root_cause": "fee_mismatch"}

@@ -34,7 +34,8 @@ def render_queue(warehouse: ReadOnlyWarehouse, store: CopilotStore, status: str 
             continue
         action = conf = ""
         if p:
-            action = p.diagnosis["proposed_action"] + (" (fallback)" if p.is_fallback else "")
+            action = p.diagnosis["proposed_action"] + (" (fallback)" if p.is_fallback else "") + (
+                " (auto)" if p.proposed_by == "scheduled_triage" else "")
             conf = f"{p.diagnosis['confidence']:.2f}"
         lines.append(f"{row['exception_id']:<34} {row['reason_code']:<29} {_cents(row['amount_minor']):>10} "
                      f"{row['age_business_days']:>3}  {state:<9} {action:<30} {conf}")
@@ -59,8 +60,10 @@ def render_show(warehouse: ReadOnlyWarehouse, store: CopilotStore, exception_id:
     events = store.events(run_id=p.run_id)
     started = next(e for e in events if e["event_type"] == "run_started")
     finished = next(e for e in events if e["event_type"] == "diagnosis")
-    out += ["", f"Diagnosis   run {p.run_id}   model {p.model}   status: {p.status.upper()}",
-            f"  mode: {'blind (reason_code hidden from the agent)' if started['payload']['hide_reason_code'] else 'standard'}"
+    out += ["", f"Diagnosis   run {p.run_id}   model {p.model}   status: {p.status.upper()}"]
+    if p.proposed_by == "scheduled_triage":
+        out.append(f"  proposed by: scheduled triage (DAG run {p.dag_run_id}); a human still approves or rejects it")
+    out += [f"  mode: {'blind (reason_code hidden from the agent)' if started['payload']['hide_reason_code'] else 'standard'}"
             f"   tool calls: {finished['payload']['tool_calls']}"
             f"   tokens in/out: {finished['payload']['input_tokens']}/{finished['payload']['output_tokens']}",
             f"  root_cause:             {d['root_cause']}"
@@ -147,9 +150,10 @@ def run_ask(settings: Settings, question: str, client_factory, out: Callable[[st
 def open_warehouse(settings: Settings) -> ReadOnlyWarehouse:
     """WAREHOUSE_ENGINE=snowflake reads as RECON_AGENT_ROLE; otherwise the read-only DuckDB file."""
     if settings.warehouse_engine == "snowflake":
-        return ReadOnlyWarehouse.snowflake(settings.snowflake, hide_reason_code=settings.copilot_hide_reason_code)
+        return ReadOnlyWarehouse.snowflake(settings.snowflake, hide_reason_code=settings.copilot_hide_reason_code,
+                                           as_of=settings.copilot_as_of)
     return ReadOnlyWarehouse(settings.duckdb_path, forbidden_paths=settings.agent_forbidden_paths(),
-                             hide_reason_code=settings.copilot_hide_reason_code)
+                             hide_reason_code=settings.copilot_hide_reason_code, as_of=settings.copilot_as_of)
 
 
 def open_store(settings: Settings) -> CopilotStore:

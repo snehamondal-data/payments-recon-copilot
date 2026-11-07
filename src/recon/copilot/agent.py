@@ -7,6 +7,8 @@ a valid diagnosis or in the fallback (escalate to a human). It never raises for 
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import time
 import uuid
 from collections.abc import Callable
@@ -27,6 +29,8 @@ from recon.copilot.prompts import PROMPT_VERSION, first_message, system_prompt
 from recon.copilot.tools import ReadOnlyWarehouse, ToolCall, ToolError, ToolSession
 
 SUBMIT = "submit_diagnosis"
+# Change every day for the same exception, so they are left out of its content hash.
+VOLATILE_FIELDS = ("as_of_date", "age_business_days")
 EXTRA_TURNS = 4  # room for one retry and one "budget spent" turn beyond the tool budget
 
 
@@ -44,6 +48,12 @@ def _inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
         return node
 
     return resolve(schema)
+
+
+def content_hash(row: dict[str, Any]) -> str:
+    """What the exception says, without the fields that only age. A new detected problem changes it."""
+    stable = {k: v for k, v in row.items() if k not in VOLATILE_FIELDS}
+    return hashlib.sha256(json.dumps(stable, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def submit_tool_definition() -> dict[str, Any]:
@@ -86,6 +96,12 @@ class RunResult:
     output_tokens: int = 0           # includes thinking
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # The orchestrator's own read of the queue row (Slice 9d): audited, but not a model tool call, so it is
+    # outside the tool budget and the evidence check.
+    context_fetch: dict[str, Any] | None = None
+    content_hash: str | None = None
+    proposed_by: str = "manual"   # manual (a person ran it) | scheduled_triage
+    dag_run_id: str | None = None
 
     @property
     def latency_s(self) -> float:
@@ -105,15 +121,18 @@ class Copilot:
         self.clock = clock
         self.tools = [*self.backend.list_tools(), submit_tool_definition()]
 
-    def diagnose(self, exception_id: str) -> RunResult:
-        try:
-            row = self.backend.exception_row(exception_id)
-        except BackendUnavailable as err:
-            row, unavailable = {}, err  # the run still ends in the fallback, below, with the reason logged
-        else:
-            unavailable = None
-            if row is None:
-                raise KeyError(f"no exception {exception_id} in the queue")
+    def diagnose(self, exception_id: str, *, row: dict[str, Any] | None = None, proposed_by: str = "manual",
+                 dag_run_id: str | None = None) -> RunResult:
+        """row: the queue row, if the caller already fetched it from this backend (triage does, to hash it)."""
+        unavailable = None
+        if row is None:
+            try:
+                row = self.backend.exception_row(exception_id)
+            except BackendUnavailable as err:
+                row, unavailable = {}, err  # the run still ends in the fallback, below, with the reason logged
+            else:
+                if row is None:
+                    raise KeyError(f"no exception {exception_id} in the queue")
         hidden = self.backend.hide_reason_code
         run = RunResult(
             run_id=f"run_{uuid.uuid4().hex[:16]}", exception_id=exception_id, model=self.client.model,
@@ -121,6 +140,11 @@ class Copilot:
             hide_reason_code=hidden, prompt_version=PROMPT_VERSION,
             started_at=datetime.now(timezone.utc), finished_at=datetime.now(timezone.utc))
         run.escalation_floor_active = self.config.escalation_floor and not hidden
+        run.proposed_by, run.dag_run_id = proposed_by, dag_run_id
+        if row:
+            run.context_fetch = {"tool": "get_exception", "arguments": {"exception_id": exception_id},
+                                 "returned_record_ids": [exception_id]}
+            run.content_hash = content_hash(row)
         session = ToolSession(self.backend)
         run.tool_calls = session.calls
         try:

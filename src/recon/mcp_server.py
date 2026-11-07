@@ -85,9 +85,10 @@ def open_agent_warehouse(settings: Settings) -> ReadOnlyWarehouse:
     check_agent_identity(settings)
     if settings.warehouse_engine == "snowflake":
         # connect() also checks the session holds exactly the agent role, with secondary roles off.
-        return ReadOnlyWarehouse.snowflake(settings.snowflake, hide_reason_code=settings.copilot_hide_reason_code)
+        return ReadOnlyWarehouse.snowflake(settings.snowflake, hide_reason_code=settings.copilot_hide_reason_code,
+                                           as_of=settings.copilot_as_of)
     return ReadOnlyWarehouse(settings.duckdb_path, forbidden_paths=settings.agent_forbidden_paths(),
-                             hide_reason_code=settings.copilot_hide_reason_code)
+                             hide_reason_code=settings.copilot_hide_reason_code, as_of=settings.copilot_as_of)
 
 
 class AccessLog:

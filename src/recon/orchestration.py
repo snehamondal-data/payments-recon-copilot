@@ -13,11 +13,13 @@ any time, in any order, even after later dates have been built:
 - summarize only reads.
 Writes replace a date's rows with delete then insert in one transaction.
 
-The copilot is deliberately absent: it proposes only when a human runs it (python -m recon.copilot).
+The copilot is not here: recon_triage (recon.triage) runs it on each date's snapshot, and only proposes.
+The snapshot also keeps each date's full exception rows (EXCEPTIONS_TABLE), which triage investigates.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -26,11 +28,14 @@ from typing import Any
 from recon.config import Settings
 from recon.contracts import DLQRecord
 from recon.warehouse import WarehouseClient
+from recon.warehouse.values import json_value
 
 DAILY_CONSUMER_GROUP = "recon-airflow-loader"
 SNAPSHOT_TABLE = "marts.recon_daily_snapshot"
 RUNS_TABLE = "marts.recon_daily_runs"
 HISTORY_TABLE = "marts.recon_window_history"
+# Each date's full exception rows, as JSON in the tools' format: what scheduled triage investigates.
+EXCEPTIONS_TABLE = "marts.recon_exceptions_daily"
 
 
 def _ddl(dialect: str) -> list[str]:
@@ -72,6 +77,14 @@ def _ddl(dialect: str) -> list[str]:
             previous_as_of_date DATE,         -- the earlier date this was compared with
             recorded_at {ts} NOT NULL DEFAULT current_timestamp,
             PRIMARY KEY (as_of_date, charge_id))""",
+        # Every column of marts.recon_exceptions for each as-of date (Slice 9d). The agent reads it, pinned
+        # to a date, when triage runs after later dates were built.
+        f"""CREATE TABLE IF NOT EXISTS {EXCEPTIONS_TABLE} (
+            as_of_date DATE NOT NULL,
+            exception_id VARCHAR NOT NULL,
+            row_json VARCHAR NOT NULL,
+            recorded_at {ts} NOT NULL DEFAULT current_timestamp,
+            PRIMARY KEY (as_of_date, exception_id))""",
     ]
 
 
@@ -129,8 +142,15 @@ def snapshot_marts(wh: WarehouseClient, as_of: date) -> dict[str, int]:
     records += [(as_of, "pending", c, c, None, None, None, None, deadline, left) for c, deadline, left in pending]
     records += [(as_of, "exception", eid, c, related, code, amount, age, None, None)
                 for eid, c, related, code, amount, age in exceptions]
+    columns = [c for (c,) in wh.execute(
+        "SELECT lower(column_name) FROM information_schema.columns WHERE lower(table_schema) = 'marts' "
+        "AND lower(table_name) = 'recon_exceptions' ORDER BY ordinal_position")]
+    full = [dict(zip(columns, (json_value(v) for v in row)))
+            for row in wh.execute(f"SELECT {', '.join(columns)} FROM marts.recon_exceptions")]
+    rows = [(as_of, r["exception_id"], json.dumps(r)) for r in sorted(full, key=lambda r: r["exception_id"])]
     with wh.transaction():
         _replace(wh, SNAPSHOT_TABLE, SNAPSHOT_COLUMNS, as_of, records)
+        _replace(wh, EXCEPTIONS_TABLE, ("as_of_date", "exception_id", "row_json"), as_of, rows)
     return {"pending": len(pending), "exceptions": len(exceptions)}
 
 
